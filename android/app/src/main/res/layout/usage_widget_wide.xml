@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="horizontal" android:padding="12dp" android:gravity="center_vertical" android:background="@drawable/widget_kraft"
+    android:baselineAligned="false">
+    <LinearLayout android:layout_width="0dp" android:layout_weight="0.9" android:layout_height="wrap_content" android:orientation="vertical">
+        <TextView android:id="@+id/widget_name" style="@style/WidgetName" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/usage_widget_title" />
+        <TextView android:id="@+id/usage_watts" style="@style/WidgetName" android:textSize="26sp" android:textDirection="ltr"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/unit_watts" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="0dp" android:layout_weight="1.8" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginStart="8dp">
+        <TextView android:id="@+id/usage_today" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:maxLines="1" android:text="@string/summary_today" />
+        <TextView android:id="@+id/usage_today_cost" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:maxLines="1" android:text="@string/summary_today" />
+        <TextView android:id="@+id/usage_month_cost" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:maxLines="1" android:text="@string/summary_month" />
+        <TextView android:id="@+id/usage_budget" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:maxLines="1" android:text="@string/monthly_budget" />
+    </LinearLayout>
+</LinearLayout>

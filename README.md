@@ -22,6 +22,7 @@ phone, from a PC, from anywhere if you run the server on a VPS.
 - [Step 0 — provision the strip (once, for either mode)](#step-0--provision-the-strip-once-for-either-mode)
 - [Mode A — Local (home network only)](#mode-a--local-home-network-only)
 - [Mode B — Server (VPS, control from anywhere)](#mode-b--server-vps-control-from-anywhere)
+- [Automation, energy and alerts](#automation-energy-and-alerts)
 - [Android app (`android/`)](#android-app-android)
 - [Web UI and HTTP API](#web-ui-and-http-api)
 - [Protocol reference](#protocol-reference)
@@ -59,8 +60,10 @@ Both modes use the same file and the same app.
 
 | Path | What it is |
 |---|---|
-| `powerk.py` | the server: TCP 10086 device server, web UI + JSON API, the `provision` command, `selftest` |
+| `powerk.py` | the server: TCP 10086 device server, rules engine, energy history, alerts, web UI + JSON API, the `provision` command, `selftest` |
+| `API.md` | the HTTP API reference (v2) |
 | `android/` | Android app source (`gradlew assembleDebug`) |
+| `powerk.json` / `powerk.db` | created at runtime next to `powerk.py` (or in `--data DIR`): names, rules, settings, energy history, event log. Not committed, so back them up yourself if you care about them. `powerk.json` holds your push tokens. |
 | `README.md` / `README.ar.md` | this document, English / Arabic |
 
 ## Requirements
@@ -164,8 +167,12 @@ credentials, never a server IP.
 
 2. Provision the strip with that IP (step 0 above).
 
-3. Open `http://<ip>:8080` in any browser on the same network — 4 outlet toggles,
-   ALL ON/OFF, live watts, kWh, temperature, voltage, Wi-Fi signal.
+3. Open `http://<ip>:8080` in any browser on the same network. It has five tabs:
+   - **Outlets:** toggles and names, ALL ON/OFF, live watts, temperature, voltage and Wi-Fi signal.
+   - **Rules:** schedules, timers, cycles and auto-off.
+   - **Energy:** a chart with cost and the monthly budget.
+   - **Alerts:** the event log.
+   - **Settings:** price, budget, limits and push.
 
 4. In the Android app: **Settings → Server IP** = that IP, port `8080`, token
    empty → **Save** → **Test** → `Connected · 1 strip(s), 1 online`.
@@ -207,7 +214,7 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/ubuntu/powerk
-ExecStart=/usr/bin/python3 /home/ubuntu/powerk/powerk.py serve --ip $PUB --web-port 7896 --token $TOKEN
+ExecStart=/usr/bin/python3 /home/ubuntu/powerk/powerk.py serve --ip $PUB --web-port 7896 --token $TOKEN --mac 88D039XXXXXX
 Restart=always
 RestartSec=3
 User=ubuntu
@@ -220,7 +227,8 @@ curl -s -o /dev/null -w 'local code: %{http_code}\n' http://127.0.0.1:7896/     
 ss -lntp | grep -E '7896|10086'
 ```
 
-Adapt `User=` / `WorkingDirectory=` / the port to your setup. `--web-port 7896`
+Adapt `User=` / `WorkingDirectory=` / the port to your setup. Replace `--mac` with your strip's MAC,
+which the UI shows after its first connection; you can also leave `--mac` out for now and add it later. `--web-port 7896`
 is only an example; `--port 10086` can never change (the strip's firmware dials
 10086).
 
@@ -257,8 +265,11 @@ journalctl -u powerk -f      # [device] MTTL 91C0C4C model=lgutap fw=0.1.54-1.0.
 
 ### Keeping the UI private (optional but recommended)
 
-Port 10086 is fine to expose: control commands only ever travel server → strip,
-so a stranger who finds that port cannot switch anything. The **UI port** is the
+Port 10086 has to be reachable by the strip. Control commands only ever travel server → strip, so a
+stranger who finds that port cannot switch anything. A stranger could still announce a fake strip, or
+claim your strip's MAC and push its session off. Use `--mac` so only your strip is accepted. The MAC
+travels in cleartext, so `--mac` is a filter, not authentication. A firewall rule that only allows your
+home IP, where that is practical, is stronger. The **UI port** is the
 one that can turn your outlets on and off, so protect it:
 
 * **Token** (`--token`) — required for every page/API call. Without it the UI is
@@ -274,6 +285,56 @@ one that can turn your outlets on and off, so protect it:
 
 ---
 
+## Automation, energy and alerts
+
+All of this runs inside `powerk.py`, so it keeps working while your phone is off. Use the web UI tabs,
+the Android app, or the [HTTP API](API.md).
+
+**Names.** Rename the strip and each outlet (for example "Fridge" or "Heater"). The web UI and the app
+show the names everywhere.
+
+**Rules** (server-side, per strip, for any set of outlets):
+
+| kind | what it does |
+|---|---|
+| Schedule | at `HH:MM` on chosen weekdays, switch ON or OFF |
+| Timer | in N minutes, switch ON or OFF once, then the timer deletes itself |
+| Cycle | ON for X minutes, OFF for Y minutes, repeating |
+| Auto-off | when an outlet is ON and draws less than W watts for N minutes, switch it off (a charger is full, or a device sits in standby) |
+
+- If the strip is offline when a schedule is due, the server logs `skipped` and does not replay the
+  action later.
+- A timer waits up to 5 minutes for the strip, then gives up.
+- Times use the server's local clock, so set the right timezone on the VPS
+  (`timedatectl set-timezone Africa/Cairo`).
+
+**Energy.** The strip keeps a running energy counter per outlet. powerk stores the increase every hour
+in `powerk.db` and shows it per day, week, month or year, with the cost at your price per kWh.
+
+- The first reading after the server starts is only a baseline.
+- Energy used while the server was down is spread over that gap when the strip reconnects.
+- All figures are estimates from the strip's meter, not your electricity bill.
+
+**Budget.** Set a monthly budget in your currency. powerk raises an alert at 50, 75, 90 and 100 % of it.
+
+**Alerts.** The Alerts tab shows these events:
+
+- the strip went offline (after 60 s) and came back
+- an outlet's temperature reached the limit
+- the strip's total power reached the limit
+- budget steps
+- rules that ran, were skipped or were not confirmed
+- auto-off actions
+
+To get them on your phone, set one or both channels in Settings, then press **Send test**:
+
+- **ntfy:** install the [ntfy](https://ntfy.sh) app, subscribe to a long random topic name, and paste
+  `https://ntfy.sh/<topic>`. Anyone who knows the topic can read it.
+- **Telegram:** create a bot with @BotFather, send it any message, and enter the bot token and your
+  chat id.
+
+**Debugging.** `GET /api/debug` shows the last raw `up:getinfo` line from each strip.
+
 ## Android app (`android/`)
 
 ```bash
@@ -287,16 +348,31 @@ Install on the phone:
   on the phone (the server serves the built APK; that URL needs no token), or
 * `adb install android/app/build/outputs/apk/debug/app-debug.apk`
 
-What you get: an animated splash, a live power ring (watts + energy/voltage/current/RSSI
-pills), 4 animated outlet tiles with an in-tile switch, ALL ON/OFF, offline/error
-states, Snackbars for failed commands, and a settings screen with server IP, port,
-token, a connection Test, and a language switch.
+What you get:
+
+* **Outlets**: a live summary (watts, V·A, today's kWh, this month's cost), four outlet tiles
+  that fill with colour when on, ALL ON / ALL OFF, rename, offline and error states.
+* **Rules, Energy, Alerts**: the same schedule / timer / cycle / auto-off rules, the
+  day-to-year energy chart with cost and budget, and the alert history as the web UI.
+* **Settings**: server address, port and token with a connection test, language, theme,
+  and **Strip info** (Wi-Fi signal in words, network address, model, firmware, MAC).
+* **Three themes**, the same as the web UI: *Kraft paper* (default), *White & blue*
+  (follows the phone's light/dark mode, or pin it) and *Chalkboard*. The fonts are bundled
+  (see `android/FONTS.md`), so nothing is downloaded.
+* **Home-screen widgets** (they follow the chosen theme):
+  * *Outlet* — one outlet; tap to switch it. 1x1 up to 2x2.
+  * *Whole strip* — strip name, total watts and four cells, each switching its own outlet.
+    4x1, 2x2 or a short row.
+  * *Usage* — watts now, today's kWh and cost, this month, and % of the monthly budget.
+    Read-only; tap opens the Energy tab.
+* **Quick Settings tile** for one chosen outlet.
 
 Behavior details:
 
-* Polls `/api/state` every 2 s; a press flips the tile immediately and shows a
-  spinner in the switch while the strip confirms.
-* Commands are blocked per outlet while one is in flight — no toggle storms.
+* Polls `/api/state` every 2 s; a press flips the tile immediately and shows the pending
+  state while the strip confirms.
+* Commands are blocked per outlet while one is in flight, and a command whose outcome is
+  unknown is never retried (app, widgets and tile alike).
 * **Languages**: Arabic + English, following the phone by default; override in
   Settings (also appears in Android's per-app language menu).
 * Debug build, no signing setup — fine for personal use, not for the Play Store.
@@ -305,22 +381,29 @@ Behavior details:
 
 ## Web UI and HTTP API
 
-| Method | Path | Notes |
-|---|---|---|
-| GET | `/` | the web UI |
-| GET | `/api/state` | `{"local_ip":"…","port":10086,"devices":[{"mac","name","model","fw","online","on","power_w","energy_kwh","voltage","current_a","rssi","outlets":[…]}]}` |
-| POST | `/api/onoff` | `{"mac":"…","outlet":0-4,"on":true}` — outlet `0` = all |
-| GET | `/powerk.py` | the script itself (public) |
-| GET | `/powerk.apk` | the built Android app, if present (public) |
+`GET /` is the web UI. The JSON API is documented in **[API.md](API.md)**. It covers state, on/off,
+names, rules, history, settings, events and push tests.
 
-When `--token` is set, every request needs it — any of:
+The web UI has five tabs (Outlets, Rules, Energy, Alerts, Settings), Arabic (RTL) and English, and
+three themes picked in Settings: *Kraft paper* (default), *White & blue* (follows the device's
+light/dark mode) and *Chalkboard*. Its fonts are embedded in `powerk.py` and served at `/fonts/`, so
+the page works on a LAN with no internet access.
+
+When `--token` is set, every request needs the token, sent in one of these ways:
 
 * `X-Token: TOKEN` header (what the app sends)
 * HTTP Basic, user `powerk` + token as password (what the browser does)
-* `?t=TOKEN` query parameter
+* `?t=TOKEN` query parameter. Opening `/?t=TOKEN` once also sets a cookie, so the page keeps working.
 
 `/powerk.py` and `/powerk.apk` stay public on purpose, so a new phone can always
 download the app and a machine without Wi-Fi can always download the provisioner.
+
+| Server option | Meaning |
+|---|---|
+| `--token T` | require token `T` for the UI/API |
+| `--mac AABBCCDDEEFF` | accept only these strip MACs (repeat the option or comma-separate them) |
+| `--data DIR` | where `powerk.json` / `powerk.db` live (default: next to `powerk.py`) |
+| `--web-port`, `--ip` | web port, and the IP shown in hints |
 
 ## Protocol reference
 
@@ -351,11 +434,13 @@ some frames with NUL bytes and the port is fixed at 10086.
 | App crashes at launch | update to the latest APK (older builds had an outlet-index crash) |
 | UI unreachable but 10086 works | the web port is not open, or you are on a network that cannot reach the VPS |
 | Nothing responds at all | `python powerk.py selftest` proves the server logic without any hardware |
+| A schedule ran at the wrong hour | the server's clock or timezone is wrong (VPS: `timedatectl`) |
+| No push arrives | Settings → **Send test** shows which channel failed and why |
 
 ## What this does not do (on purpose)
 
-MQTT/Home Assistant entities, Matter, energy history, firmware OTA, multi-user
-accounts. Add them when you actually want them.
+MQTT/Home Assistant entities, Matter, firmware OTA, multi-user accounts, and tariff tiers or tax: costs
+use one flat price per kWh. Add them when you actually want them.
 
 ---
 

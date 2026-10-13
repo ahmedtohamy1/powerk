@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="8dp" android:background="@drawable/widget_kraft">
+    <LinearLayout android:id="@+id/strip_header" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="horizontal" android:gravity="center_vertical">
+        <TextView android:id="@+id/widget_name" style="@style/WidgetName" android:layout_width="0dp"
+            android:layout_weight="1" android:layout_height="wrap_content" android:textSize="7sp" android:maxLines="1" android:text="@string/strip_widget_title" />
+        <TextView android:id="@+id/widget_state" style="@style/WidgetFigures" android:layout_width="wrap_content" android:textDirection="ltr"
+            android:layout_height="wrap_content" android:textSize="9sp" android:layout_marginStart="10dp" android:text="@string/unit_watts" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:orientation="horizontal" android:baselineAligned="false">
+        <LinearLayout android:id="@+id/strip_cell_1" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:orientation="vertical" android:paddingHorizontal="8dp" android:paddingVertical="1dp" android:background="@drawable/widget_kraft_on">
+            <TextView android:id="@+id/strip_name_1" style="@style/WidgetCellName" android:textSize="8sp" android:maxLines="1" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:gravity="center" android:text="@string/state_on" />
+            <TextView android:id="@+id/strip_state_1" style="@style/WidgetCellState" android:textSize="10sp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/unit_watts" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/strip_cell_2" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:orientation="vertical" android:paddingHorizontal="8dp" android:paddingVertical="1dp" android:layout_marginStart="4dp" android:background="@drawable/widget_kraft">
+            <TextView android:id="@+id/strip_name_2" style="@style/WidgetCellName" android:textSize="8sp" android:maxLines="1" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:gravity="center" android:text="@string/state_off" />
+            <TextView android:id="@+id/strip_state_2" style="@style/WidgetCellState" android:textSize="10sp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/state_off" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/strip_cell_3" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:orientation="vertical" android:paddingHorizontal="8dp" android:paddingVertical="1dp" android:layout_marginStart="4dp" android:background="@drawable/widget_kraft">
+            <TextView android:id="@+id/strip_name_3" style="@style/WidgetCellName" android:textSize="8sp" android:maxLines="1" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:gravity="center" android:text="@string/state_off" />
+            <TextView android:id="@+id/strip_state_3" style="@style/WidgetCellState" android:textSize="10sp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/state_off" />
+        </LinearLayout>
+        <LinearLayout android:id="@+id/strip_cell_4" android:layout_width="0dp" android:layout_weight="1" android:layout_height="match_parent"
+            android:orientation="vertical" android:paddingHorizontal="8dp" android:paddingVertical="1dp" android:layout_marginStart="4dp" android:background="@drawable/widget_kraft_on">
+            <TextView android:id="@+id/strip_name_4" style="@style/WidgetCellName" android:textSize="8sp" android:maxLines="1" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:gravity="center" android:text="@string/state_on" />
+            <TextView android:id="@+id/strip_state_4" style="@style/WidgetCellState" android:textSize="10sp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/unit_watts" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

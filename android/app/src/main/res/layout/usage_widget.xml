@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="14dp" android:gravity="center_vertical" android:background="@drawable/widget_kraft">
+    <TextView android:id="@+id/widget_name" style="@style/WidgetName" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/usage_widget_title" />
+    <TextView android:id="@+id/usage_watts" style="@style/WidgetName" android:textSize="32sp" android:textDirection="ltr"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/unit_watts" />
+    <TextView android:id="@+id/usage_today" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/summary_today" />
+    <TextView android:id="@+id/usage_today_cost" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/summary_today" />
+    <TextView android:id="@+id/usage_month_cost" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/summary_month" />
+    <TextView android:id="@+id/usage_budget" style="@style/WidgetFigures" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/monthly_budget" />
+</LinearLayout>

@@ -49,9 +49,18 @@ class StringsTest {
     @Test
     fun noStrayPercentSigns() {
         (default + arabic).forEach { (name, text) ->
-            val stray = Regex("""%(?!\d+\$)""").findAll(text).count()
+            // %% is a literal percent in String.format, not an unformatted argument.
+            val stray = strayPercentCount(text)
             assertEquals("unformatted % in '$name'", 0, stray)
         }
+    }
+
+    private fun strayPercentCount(text: String) = Regex("""%(?!\d+\$)""").findAll(text.replace("%%", "")).count()
+
+    @Test fun literalPercentEscapesAreAllowedButStraySignsStillFail() {
+        assertEquals(0, strayPercentCount("%1\$d%% of budget"))
+        assertEquals(1, strayPercentCount("%1\$d% of budget"))
+        assertEquals(1, strayPercentCount("%%%"))
     }
 
     @Test

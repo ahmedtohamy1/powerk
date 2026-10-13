@@ -33,3 +33,8 @@ android/captures/
 Thumbs.db
 desktop.ini
 
+
+# ---- powerk runtime data (names, rules, settings incl. push tokens, energy history) ----
+powerk.json
+powerk.json.tmp
+powerk.db

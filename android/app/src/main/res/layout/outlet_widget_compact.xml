@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="8dp" android:background="@drawable/widget_kraft_on"
+    android:contentDescription="@string/outlet_widget_description">
+    <ImageView android:id="@+id/widget_power" android:layout_width="16dp" android:layout_height="16dp"
+        android:layout_gravity="end" android:src="@drawable/widget_power" android:contentDescription="@null" />
+    <TextView android:id="@+id/widget_name" style="@style/WidgetName" android:textSize="14sp"
+        android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"
+        android:gravity="center_vertical" android:maxLines="2" android:text="@string/widget_title" />
+    <TextView android:id="@+id/widget_state" style="@style/WidgetFigures" android:textSize="12sp"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:maxLines="1"
+        android:textDirection="ltr" android:text="@string/unit_watts" />
+</LinearLayout>

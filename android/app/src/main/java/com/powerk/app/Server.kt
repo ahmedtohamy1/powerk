@@ -25,8 +25,10 @@ object Server {
         private set
     var token by mutableStateOf("")
         private set
+    private var revision by mutableIntStateOf(0)
 
     fun init(context: Context) {
+        if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences("powerk", Context.MODE_PRIVATE)
         prefs = p
         host = p.getString("host", "").orEmpty()
@@ -35,6 +37,7 @@ object Server {
     }
 
     fun save(newHost: String, newPort: Int, newToken: String) {
+        if (host != newHost.trim() || port != newPort.coerceIn(1, 65535) || token != newToken.trim()) revision++
         host = newHost.trim()
         port = newPort.coerceIn(1, 65535)
         token = newToken.trim()
@@ -47,6 +50,7 @@ object Server {
 
     val configured: Boolean get() = host.isNotBlank()
     val base: String get() = "http://$host:$port"
+    val connection: ServerConnection get() = ServerConnection(base, token, revision)
 }
 
 /** In-app language: null follows the phone language. */
@@ -57,6 +61,7 @@ object Lang {
     private var prefs: SharedPreferences? = null
 
     fun init(context: Context) {
+        if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences("powerk", Context.MODE_PRIVATE)
         prefs = p
         code = p.getString("lang", "").orEmpty().ifBlank { null }
@@ -66,6 +71,7 @@ object Lang {
     fun set(context: Context, value: String?) {
         code = value
         prefs?.edit()?.putString("lang", value.orEmpty())?.apply()
+        WidgetUpdates.appearanceChanged(context)
         val activity = context.findActivity() ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             setPlatformLocales(activity, value)

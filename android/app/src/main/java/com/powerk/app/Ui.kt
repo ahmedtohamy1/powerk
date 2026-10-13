@@ -19,6 +19,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,18 +47,28 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TopAppBar
+import androidx.activity.compose.BackHandler
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularWavyProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -83,6 +94,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -93,42 +105,60 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.ui.unit.sp
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PowerkApp() {
-    var tab by remember { mutableIntStateOf(0) }
+fun PowerkApp(initialTab: Int = 0, navigationRequest: Int = 0) {
+    var tab by remember { mutableIntStateOf(initialTab) }
     var snapshot by remember { mutableStateOf<Snapshot?>(null) }
+    var snapshotConnection by remember { mutableStateOf<ServerConnection?>(null) }
+    val shownSnapshot = snapshot.takeIf { snapshotConnection == Server.connection }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var showSplash by remember { mutableStateOf(true) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val resources = LocalResources.current
+    val lifecycle = (context.findActivity() as androidx.lifecycle.LifecycleOwner).lifecycle
+    var settingsOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(initialTab, navigationRequest) { tab = initialTab; settingsOpen = false }
+    BackHandler(settingsOpen) { settingsOpen = false }
     // "mac:outlet" -> state we are switching to right now (optimistic UI while the strip answers)
     val pending = remember { mutableStateMapOf<String, Boolean>() }
 
     suspend fun refresh() {
         if (!Server.configured) return
+        val connection = Server.connection
         loading = true
         try {
-            snapshot = Api.snapshot(Server.base, Server.token)
-            error = null
+            val result = connectionResult(connection, { Server.connection }) { Api.snapshot(it.base, it.token) }
+            if (result != null) {
+                snapshot = result; snapshotConnection = connection; error = null
+                WidgetUpdates.freshSnapshot(context, result, connection)
+            }
         } catch (e: Exception) {
-            error = e.message ?: e.javaClass.simpleName
-            snapshot = null
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (connection.isCurrent(Server.connection)) error = uiError(resources, e)
+        } finally {
+            if (connection.isCurrent(Server.connection)) loading = false
         }
-        loading = false
     }
 
     LaunchedEffect(Unit) {
@@ -136,25 +166,36 @@ fun PowerkApp() {
         showSplash = false
     }
 
-    LaunchedEffect(tab, Server.host, Server.port, Server.token) {
-        while (true) {
-            refresh()
-            delay(2000)
+    LaunchedEffect(Server.connection) {
+        snapshot = null // Never display a different server's last good data.
+        WidgetUpdates.renderAll(context)
+        error = null
+        pending.clear()
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                refresh()
+                delay(2000)
+            }
         }
     }
 
     fun command(mac: String, outlet: Int, on: Boolean) {
+        val connection = Server.connection
         val keys = if (outlet == 0) (1..4).map { "$mac:$it" } else listOf("$mac:$outlet")
         if (keys.any { pending.containsKey(it) }) return
         keys.forEach { pending[it] = on }
         scope.launch {
             try {
-                Api.setOutlet(Server.base, Server.token, mac, outlet, on)
-                refresh()
+                val confirmed = Api.setOutlet(connection.base, connection.token, mac, outlet, on)
+                if (connection.isCurrent(Server.connection)) {
+                    refresh()
+                    if (!confirmed) snackbar.showSnackbar(resources.getString(R.string.not_confirmed))
+                }
             } catch (e: Exception) {
-                snackbar.showSnackbar(e.message ?: "command failed")
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (connection.isCurrent(Server.connection)) snackbar.showSnackbar(uiError(resources, e))
             } finally {
-                keys.forEach { pending.remove(it) }
+                if (connection.isCurrent(Server.connection)) keys.forEach { pending.remove(it) }
             }
         }
     }
@@ -164,25 +205,44 @@ fun PowerkApp() {
             containerColor = MaterialTheme.colorScheme.background,
             contentColor = MaterialTheme.colorScheme.onBackground,
             snackbarHost = { SnackbarHost(snackbar) },
+            topBar = {
+                TopAppBar(title = { Text("POWERK", style = LocalPowerkType.current.brand) },
+                    navigationIcon = {
+                        if (settingsOpen) IconButton(onClick = { settingsOpen = false }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back))
+                        }
+                     }, actions = {
+                         TextButton(onClick = {
+                             Lang.set(context, if (resources.configuration.locales[0].language == "ar") "en" else "ar")
+                             WidgetUpdates.appearanceChanged(context)
+                         }) { Text(if (resources.configuration.locales[0].language == "ar") "EN" else "العربية") }
+                        if (!settingsOpen) IconButton(onClick = { settingsOpen = true }) {
+                            Icon(Icons.Filled.Settings, stringResource(R.string.open_settings))
+                        }
+                    })
+            },
             bottomBar = {
-                ShortNavigationBar {
-                    ShortNavigationBarItem(
-                        selected = tab == 0,
-                        onClick = { tab = 0 },
-                        icon = { Icon(Icons.Filled.Home, contentDescription = null) },
-                        label = { Text(stringResource(R.string.tab_plugs)) },
-                    )
-                    ShortNavigationBarItem(
-                        selected = tab == 1,
-                        onClick = { tab = 1 },
-                        icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
-                        label = { Text(stringResource(R.string.tab_settings)) },
-                    )
+                if (!settingsOpen) {
+                Column {
+                DashedDivider()
+                ShortNavigationBar(containerColor = LocalPowerkColors.current.bar) {
+                    val labels = listOf(R.string.tab_plugs, R.string.tab_rules, R.string.tab_energy, R.string.tab_alerts)
+                    val icons = listOf(Icons.Filled.Home, Icons.Filled.DateRange, Icons.Filled.Star, Icons.Filled.Notifications)
+                    labels.forEachIndexed { index, label ->
+                        ShortNavigationBarItem(selected = tab == index, onClick = { tab = index },
+                            icon = {
+                                BadgedBox(badge = {
+                                    if (index == 3 && (shownSnapshot?.unreadAlerts ?: 0) > 0) Badge { Text(shownSnapshot!!.unreadAlerts.toString()) }
+                                }) { Icon(icons[index], contentDescription = null) }
+                            }, label = { Text(stringResource(label)) })
+                    }
+                }
+                }
                 }
             },
         ) { padding ->
             AnimatedContent(
-                targetState = tab,
+                targetState = if (settingsOpen) 4 else tab,
                 transitionSpec = {
                     val forward = targetState > initialState
                     val shift = if (forward) 1 else -1
@@ -194,16 +254,24 @@ fun PowerkApp() {
             ) { current ->
                 if (current == 0) {
                     PlugsScreen(
-                        snapshot = snapshot,
+                        snapshot = shownSnapshot,
                         error = error,
                         loading = loading,
                         pending = pending,
                         onRefresh = { scope.launch { refresh() } },
-                        onOpenSettings = { tab = 1 },
+                        onOpenSettings = { settingsOpen = true },
                         onCommand = { mac, outlet, on -> command(mac, outlet, on) },
                     )
                 } else {
-                    SettingsScreen()
+                    Column(Modifier.fillMaxSize()) {
+                        if (error != null) ErrorBanner(error!!)
+                        when (current) {
+                            1 -> RulesScreen(shownSnapshot)
+                            2 -> EnergyScreen(shownSnapshot)
+                            3 -> AlertsScreen(shownSnapshot) { scope.launch { refresh() } }
+                            4 -> SettingsScreen(shownSnapshot)
+                        }
+                    }
                 }
             }
         }
@@ -224,8 +292,8 @@ private fun Splash() {
 
     Box(
         Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(listOf(scheme.primaryContainer, scheme.background))),
+             .fillMaxSize()
+            .background(scheme.background),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -245,13 +313,13 @@ private fun Splash() {
                     painter = painterResource(R.drawable.ic_launcher_foreground),
                     contentDescription = null,
                     modifier = Modifier.size(150.dp),
-                    tint = Color.Unspecified,
+                    tint = scheme.primary,
                 )
             }
             Spacer(Modifier.height(18.dp))
             Text(
-                stringResource(R.string.app_name),
-                style = MaterialTheme.typography.displaySmall,
+                "POWERK",
+                style = LocalPowerkType.current.brand.copy(fontSize = 36.sp),
                 fontWeight = FontWeight.SemiBold,
                 color = scheme.onSurface,
                 modifier = Modifier.graphicsLayer { alpha = appear.value },
@@ -270,7 +338,7 @@ private fun Splash() {
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun PlugsScreen(
+fun PlugsScreen(
     snapshot: Snapshot?,
     error: String?,
     loading: Boolean,
@@ -280,20 +348,22 @@ private fun PlugsScreen(
     onCommand: (String, Int, Boolean) -> Unit,
 ) {
     val strips = snapshot?.strips.orEmpty()
+    var renameTarget by remember { mutableStateOf<Pair<Strip, Int>?>(null) }
+    renameTarget?.let { (strip, n) ->
+        RenameDialog(strip, n, onDismiss = { renameTarget = null }, onSaved = onRefresh)
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 36.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        item {
-            Header(
-                stripCount = strips.size,
-                onlineCount = strips.count { it.online },
-                configured = Server.configured,
-                loading = loading,
-                onRefresh = onRefresh,
-            )
+        if (loading || strips.isEmpty()) item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                IconButton(onClick = onRefresh, enabled = Server.configured && !loading) {
+                    Icon(Icons.Filled.Refresh, stringResource(R.string.refresh))
+                }
+            }
         }
 
         item {
@@ -320,8 +390,10 @@ private fun PlugsScreen(
                 StripCard(
                     strip = strip,
                     showMac = strips.size > 1,
+                    currency = snapshot?.currency.orEmpty(),
                     pending = pending,
                     onCommand = onCommand,
+                    onRename = { n -> renameTarget = strip to n },
                     modifier = Modifier.animateItem(),
                 )
             }
@@ -399,49 +471,54 @@ private fun Header(
 private fun StripCard(
     strip: Strip,
     showMac: Boolean,
+    currency: String,
     pending: Map<String, Boolean>,
     onCommand: (String, Int, Boolean) -> Unit,
+    onRename: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val stateOf: (Int) -> Boolean = { n -> pending["${strip.mac}:$n"] ?: strip.outletOn(n) }
-    val anyOn = (1..4).any(stateOf)
     val allPending = (1..4).any { pending.containsKey("${strip.mac}:$it") }
-
-    ElevatedCard(modifier.fillMaxWidth()) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-
+    val c = LocalPowerkColors.current
+    val still = reducedMotion()
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(online = strip.online)
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    val title = stringResource(R.string.strip_name) +
-                        if (showMac) " · ${strip.mac.takeLast(7)}" else ""
-                    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        stringResource(R.string.strip_fw, strip.fw),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Box(Modifier.weight(1f)) { HighlightTitle(strip.displayName) }
+                IconButton(onClick = { onRename(0) }) { Icon(Icons.Filled.Edit, stringResource(R.string.rename)) }
+                StatusChip(strip.online)
             }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                PowerRing(watts = strip.powerW, enabled = strip.online)
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricPill("${strip.energyKwh} kWh")
-                    strip.voltage?.let { MetricPill("${it.roundToInt()} V") }
-                    strip.currentA?.let { MetricPill("$it A") }
-                    strip.rssi?.let { MetricPill("$it dBm") }
+            AlarmChips(strip.alarms)
+            Box(Modifier.fillMaxWidth().padding(top = 8.dp).rotate(if (still) 0f else -.4f)) {
+                PaperCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(stringResource(R.string.using_now), style = LocalPowerkType.current.hand, color = c.ink2)
+                        Text(if (strip.online) "${decimal(strip.powerW, 1)} W" else "— W",
+                            style = MaterialTheme.typography.displayMedium.copy(textDirection = androidx.compose.ui.text.style.TextDirection.Ltr))
+                        Text(listOfNotNull(strip.voltage?.let { "${decimal(it, 1)} V" }, strip.currentA?.let { "${decimal(it, 2)} A" })
+                            .joinToString(" · "), style = LocalPowerkType.current.figures, color = c.ink2)
+                        DashedDivider(Modifier.padding(vertical = 4.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Column(Modifier.weight(1f)) {
+                                Text(stringResource(R.string.summary_today), style = LocalPowerkType.current.hand, color = c.ink2)
+                                Text("${decimal(strip.todayKwh, 2)} kWh", style = LocalPowerkType.current.figures)
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text(stringResource(R.string.summary_month), style = LocalPowerkType.current.hand, color = c.ink2)
+                                Text("${decimal(strip.monthCost, 1)} $currency", style = LocalPowerkType.current.figures)
+                            }
+                        }
+                    }
                 }
+                Box(Modifier.align(Alignment.TopStart).offset(x = 28.dp, y = (-12).dp)
+                    .rotate(if (still) 0f else -5f).shadow(2.dp).size(92.dp, 24.dp).background(c.tape))
+                Box(Modifier.align(Alignment.TopEnd).offset(x = (-34).dp, y = (-10).dp)
+                    .rotate(if (still) 0f else 4f).shadow(2.dp).size(70.dp, 22.dp).background(c.tape))
             }
 
             for (row in 0 until 2) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     for (column in 0 until 2) {
-                        val outlet = strip.outlets.getOrNull(row * 2 + column)
+                        val outlet = strip.outlet(row * 2 + column + 1)
                         if (outlet == null) {
                             Spacer(Modifier.weight(1f))
                         } else {
@@ -451,6 +528,7 @@ private fun StripCard(
                                 pending = pending.containsKey("${strip.mac}:${outlet.n}"),
                                 enabled = strip.online,
                                 onToggle = { onCommand(strip.mac, outlet.n, it) },
+                                onRename = { onRename(outlet.n) },
                                 modifier = Modifier.weight(1f),
                             )
                         }
@@ -458,21 +536,14 @@ private fun StripCard(
                 }
             }
 
-            FilledTonalButton(
-                onClick = { onCommand(strip.mac, 0, !anyOn) },
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-                enabled = strip.online && !allPending,
-            ) {
-                if (allPending) {
-                    CircularWavyProgressIndicator(Modifier.size(22.dp))
-                    Spacer(Modifier.width(10.dp))
-                }
-                Text(
-                    stringResource(if (anyOn) R.string.turn_all_off else R.string.turn_all_on),
-                    fontWeight = FontWeight.SemiBold,
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { onCommand(strip.mac, 0, true) }, enabled = strip.online && !allPending,
+                    shape = Wobble2, border = BorderStroke(2.dp, c.ink), colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg),
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text(stringResource(R.string.turn_all_on)) }
+                OutlinedButton(onClick = { onCommand(strip.mac, 0, false) }, enabled = strip.online && !allPending,
+                    shape = Wobble2, border = BorderStroke(2.dp, c.ink), colors = ButtonDefaults.outlinedButtonColors(contentColor = c.ink),
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text(stringResource(R.string.turn_all_off)) }
             }
-        }
     }
 }
 
@@ -484,6 +555,7 @@ private fun OutletTile(
     pending: Boolean,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
+    onRename: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -493,8 +565,11 @@ private fun OutletTile(
         animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow),
         label = "toggle",
     )
-    val container = lerp(scheme.surfaceContainerHighest, scheme.primaryContainer, progress)
-    val content = lerp(scheme.onSurface, scheme.onPrimaryContainer, progress)
+    val c = LocalPowerkColors.current
+    val container = lerp(c.card, c.accent, progress)
+    val content = lerp(c.ink, c.onAccent, progress)
+    val secondary = if (on) c.onAccentSecondary else c.ink2
+    val still = reducedMotion()
 
     Surface(
         onClick = {
@@ -502,16 +577,13 @@ private fun OutletTile(
             onToggle(!on)
         },
         enabled = enabled && !pending,
-        shape = MaterialTheme.shapes.large,
+        shape = Wobble2,
+        border = BorderStroke(2.dp, c.ink),
         color = container,
         contentColor = content,
         modifier = modifier
-            .heightIn(min = 96.dp)
-            .graphicsLayer {
-                val pop = 1f + 0.015f * progress
-                scaleX = pop
-                scaleY = pop
-            },
+            .heightIn(min = 164.dp)
+            .rotate(if (still) 0f else if (outlet.n % 2 == 1) -.7f else .6f),
     ) {
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
@@ -519,36 +591,30 @@ private fun OutletTile(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    stringResource(R.string.outlet_n, outlet.n),
-                    style = MaterialTheme.typography.labelLarge,
+                    markerText(outlet.name.ifBlank { stringResource(R.string.outlet_n, outlet.n) }),
+                    style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f),
                 )
-                // while the strip is answering, the switch becomes a spinner
-                AnimatedContent(
-                    targetState = pending,
-                    transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
-                    label = "switch-pending",
-                ) { isPending ->
-                    if (isPending) {
-                        CircularWavyProgressIndicator(Modifier.size(22.dp))
-                    } else {
-                        MiniSwitch(progress = progress, onColor = scheme.primary)
-                    }
+            }
+            AlarmChips(outlet.alarms)
+            Text(
+                "${stringResource(if (!enabled) R.string.state_offline else if (pending) R.string.switching else if (on) R.string.state_on else R.string.state_off)} · ${isolateFigures("${outlet.tempC}°")}",
+                style = LocalPowerkType.current.hand.copy(fontSize = 12.sp, lineHeight = 20.sp),
+                color = secondary,
+            )
+            Text(
+                if (enabled) "${decimal(outlet.powerW, 1)} W" else "— W",
+                style = LocalPowerkType.current.figures.copy(fontSize = 24.sp),
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    if (pending) CircularWavyProgressIndicator(Modifier.size(22.dp), color = content)
+                    else MiniSwitch(progress = progress, onColor = c.switchOn)
+                }
+                IconButton(onClick = onRename, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Filled.Edit, stringResource(R.string.rename), tint = content, modifier = Modifier.size(18.dp))
                 }
             }
-            Text(
-                stringResource(if (on) R.string.state_on else R.string.state_off),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            Text(
-                if (on) {
-                    stringResource(R.string.tile_on_detail, outlet.powerW.toString(), outlet.tempC)
-                } else {
-                    stringResource(R.string.tile_off_detail, outlet.tempC)
-                },
-                style = MaterialTheme.typography.labelSmall,
-            )
         }
     }
 }
@@ -557,8 +623,8 @@ private fun OutletTile(
 @Composable
 private fun MiniSwitch(progress: Float, onColor: Color) {
     val scheme = MaterialTheme.colorScheme
-    val track = lerp(scheme.outlineVariant, onColor, progress)
-    val thumb = lerp(scheme.surfaceContainerLowest, scheme.onPrimary, progress)
+    val track = lerp(LocalPowerkColors.current.fill, onColor, progress)
+    val thumb = LocalPowerkColors.current.switchThumb
 
     Box(
         Modifier
@@ -686,6 +752,7 @@ private fun StatusDot(online: Boolean) {
 private fun MessageCard(text: String, isError: Boolean, icon: androidx.compose.ui.graphics.vector.ImageVector? = null) {
     Card(
         Modifier.fillMaxWidth(),
+        border = BorderStroke(1.5.dp, LocalPowerkColors.current.ink),
         colors = CardDefaults.cardColors(
             containerColor = if (isError) MaterialTheme.colorScheme.errorContainer
             else MaterialTheme.colorScheme.surfaceContainerHighest,
@@ -737,7 +804,7 @@ private fun EmptyState(title: String, body: String, action: String? = null, onAc
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun SettingsScreen() {
+fun SettingsScreen(snapshot: Snapshot?, serverSettingsFixture: ServerSettings? = null) {
     var host by remember { mutableStateOf(Server.host) }
     var port by remember { mutableStateOf(Server.port.toString()) }
     var token by remember { mutableStateOf(Server.token) }
@@ -747,23 +814,22 @@ private fun SettingsScreen() {
     var lang by remember { mutableStateOf(Lang.code) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val resources = LocalResources.current
 
-    fun commit() = Server.save(host, port.toIntOrNull() ?: 8080, token)
+    fun commit() = Server.save(host, port.apiInt() ?: 8080, token)
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text(
-            stringResource(R.string.settings_title),
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
+        HighlightTitle(stringResource(R.string.settings_title))
+        ThemePicker()
+        snapshot?.strips?.forEach { StripInfoCard(it) }
 
-        ElevatedCard(Modifier.fillMaxWidth()) {
+        PaperCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(
-                    stringResource(R.string.language_title),
+                    markerText(stringResource(R.string.language_title)),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -782,17 +848,18 @@ private fun SettingsScreen() {
                                     Lang.set(context, value)
                                 }
                             },
-                            shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                            shape = Wobble2,
+                            colors = paperSegmentColors(),
                         ) { Text(label) }
                     }
                 }
             }
         }
 
-        ElevatedCard(Modifier.fillMaxWidth()) {
+        PaperCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(
-                    stringResource(R.string.server_title),
+                    markerText(stringResource(R.string.server_title)),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -805,6 +872,7 @@ private fun SettingsScreen() {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                     OutlinedTextField(
                         value = host,
+                        textStyle = LocalPowerkType.current.figures,
                         onValueChange = { host = it },
                         label = { Text(stringResource(R.string.field_host)) },
                         singleLine = true,
@@ -813,6 +881,7 @@ private fun SettingsScreen() {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedTextField(
                             value = port,
+                            textStyle = LocalPowerkType.current.figures,
                             onValueChange = { port = it.filter(Char::isDigit).take(5) },
                             label = { Text(stringResource(R.string.field_port)) },
                             singleLine = true,
@@ -823,6 +892,8 @@ private fun SettingsScreen() {
                             value = token,
                             onValueChange = { token = it },
                             label = { Text(stringResource(R.string.field_token)) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                             singleLine = true,
                             modifier = Modifier.weight(1.4f),
                         )
@@ -832,7 +903,7 @@ private fun SettingsScreen() {
                     Button(
                         onClick = {
                             commit()
-                            status = context.getString(R.string.saved)
+                            status = resources.getString(R.string.saved)
                             statusOk = true
                         },
                         modifier = Modifier.weight(1f),
@@ -843,20 +914,26 @@ private fun SettingsScreen() {
                             commit()
                             busy = true
                             status = null
+                            val connection = Server.connection
                             scope.launch {
                                 try {
-                                    val snap = Api.snapshot(Server.base, Server.token)
-                                    status = context.getString(
+                                    val snap = connectionResult(connection, { Server.connection }) { Api.snapshot(it.base, it.token) }
+                                        ?: return@launch
+                                    status = resources.getString(
                                         R.string.connected_summary,
                                         snap.strips.size,
                                         snap.strips.count { it.online },
                                     )
                                     statusOk = true
                                 } catch (e: Exception) {
-                                    status = e.message ?: "connection failed"
-                                    statusOk = false
+                                    if (e is kotlinx.coroutines.CancellationException) throw e
+                                    if (connection.isCurrent(Server.connection)) {
+                                        status = uiError(resources, e)
+                                        statusOk = false
+                                    }
+                                } finally {
+                                    busy = false
                                 }
-                                busy = false
                             }
                         },
                         modifier = Modifier.weight(1f),
@@ -891,10 +968,13 @@ private fun SettingsScreen() {
             }
         }
 
-        ElevatedCard(Modifier.fillMaxWidth()) {
+        ServerSettingsSection(serverSettingsFixture)
+        TileTargetSection(snapshot)
+
+        PaperCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    stringResource(R.string.setup_title),
+                    markerText(stringResource(R.string.setup_title)),
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -910,7 +990,7 @@ private fun SettingsScreen() {
                     )
                 }
                 SetupStep(4, stringResource(R.string.setup_step_4))
-                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                DashedDivider(Modifier.padding(vertical = 4.dp))
                 Text(
                     stringResource(R.string.setup_footer),
                     style = MaterialTheme.typography.bodySmall,
