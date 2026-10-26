@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -34,6 +35,9 @@ SETUP_PORT = 30300
 WEB_PORT = 8080
 POLL_SECONDS = 5.0
 DIAG_EVERY = 3                  # voltage/current/RSSI every 3rd poll
+COMMAND_TIMEOUT = 8.0
+CLIENT_TIMEOUT = 20.0
+MAX_BODY = 4096
 
 BOOTINFO_RE = re.compile(
     r"^up:bootinfo:([^;\r\n]+);([0-9A-Fa-f]{12});([0-9A-Fa-f]{12});([^;\r\n]+);connect$"
@@ -80,6 +84,7 @@ class Device:
         self.fw = fw
         self.ip = ip
         self.online = False
+        self.last_seen: float | None = None
         self.voltage_v: float | None = None
         self.rssi: int | None = None
         self.outlets = {n: {"n": n, "on": False, "power_w": 0.0, "energy_kwh": 0.0, "temp_c": 0} for n in range(1, 5)}
@@ -95,7 +100,7 @@ class Device:
         return round(sum(o["power_w"] for o in self.outlets.values()) / self.voltage_v, 2)
 
     def snapshot(self) -> dict:
-        outlets = list(self.outlets.values())
+        outlets = [dict(outlet) for outlet in self.outlets.values()]
         return {
             "mac": self.mac,
             "name": self.name,
@@ -103,6 +108,7 @@ class Device:
             "fw": self.fw,
             "ip": self.ip,
             "online": self.online,
+            "last_seen": self.last_seen,
             "on": any(o["on"] for o in outlets),
             "power_w": round(sum(o["power_w"] for o in outlets), 2),
             "energy_kwh": round(sum(o["energy_kwh"] for o in outlets), 3),
@@ -149,7 +155,7 @@ class Session:
             for ch in channels:
                 await self.send(f"up:onoff:{ch}:{'on' if on else 'off'}")
             await asyncio.sleep(0.3)          # let the relay settle before the snapshot
-            return await self._refresh()
+            return await self._refresh() and all(self.device.outlets[ch]["on"] == on for ch in channels)
 
     async def diagnostics(self) -> None:
         async with self.lock:
@@ -158,9 +164,11 @@ class Session:
 
 
 class Hub:
-    def __init__(self) -> None:
+    def __init__(self, allowed_devices: set[str] | None = None) -> None:
         self.devices: dict[str, Device] = {}
         self.sessions: dict[str, Session] = {}
+        self.allowed_devices = allowed_devices or set()
+        self.connections = 0
 
     def session(self, mac: str) -> Session | None:
         s = self.sessions.get(mac.upper())
@@ -171,14 +179,40 @@ class Hub:
     def snapshot(self) -> dict:
         return {"devices": [d.snapshot() for d in self.devices.values()]}
 
+    async def state(self) -> dict:
+        # HTTP workers must read state on the event loop that owns it.
+        return self.snapshot()
+
+    async def command(self, mac: str, channels: list[int], on: bool) -> bool:
+        session = self.session(mac)
+        if session is None:
+            raise ConnectionError("device offline")
+        return await asyncio.wait_for(session.set_outlets(channels, on), COMMAND_TIMEOUT)
+
+    async def refresh_session(self, session: Session) -> None:
+        try:
+            if not await session.refresh():
+                session.device.online = False
+                session.writer.close()
+        except (ConnectionError, OSError):
+            session.writer.close()
+
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self.connections >= 32:
+            writer.close()
+            await writer.wait_closed()
+            return
+        self.connections += 1
+        initial_refresh = None
+        handshake_deadline = asyncio.get_running_loop().time() + 10.0
         peer = writer.get_extra_info("peername")
         ip = peer[0] if peer else "?"
         s = Session(ip, reader, writer)
         print(f"[device] connection from {ip}")
         try:
             while True:
-                raw = await reader.readline()
+                timeout = CLIENT_TIMEOUT if s.device else max(0.001, handshake_deadline - asyncio.get_running_loop().time())
+                raw = await asyncio.wait_for(reader.readline(), timeout)
                 if not raw:
                     break
                 if len(raw) > 8192:
@@ -189,16 +223,17 @@ class Hub:
                 m = BOOTINFO_RE.match(line)
                 if m:
                     mac = m.group(2).upper()
+                    # MACs are an enrollment filter, not proof of device identity.
+                    if (s.device or (self.allowed_devices and mac not in self.allowed_devices)
+                            or self.sessions.get(mac) or (mac not in self.devices and len(self.devices) >= 64)):
+                        break
                     d = self.devices.get(mac) or Device(mac, m.group(1), m.group(4), ip)
-                    d.model, d.fw, d.ip, d.online = m.group(1), m.group(4), ip, True
+                    d.model, d.fw, d.ip, d.online = m.group(1), m.group(4), ip, False
                     s.device = d
                     self.devices[mac] = d
-                    old = self.sessions.get(mac)
-                    if old and old is not s:
-                        old.writer.close()
                     self.sessions[mac] = s
                     print(f"[device] {d.name} model={d.model} fw={d.fw}")
-                    asyncio.create_task(s.refresh())
+                    initial_refresh = asyncio.create_task(self.refresh_session(s))
                     continue
 
                 if not s.device:
@@ -206,8 +241,10 @@ class Hub:
 
                 if line.startswith("up:getinfo:"):
                     records = parse_getinfo(line)
-                    if len(records) == 4:
+                    if len(records) == 4 and {r["n"] for r in records} == {1, 2, 3, 4}:
                         s.device.outlets = {r["n"]: r for r in records}
+                        s.device.online = True
+                        s.device.last_seen = time.time()
                         s.got_getinfo.set()
                     continue
 
@@ -236,6 +273,10 @@ class Hub:
         except Exception as err:
             print(f"[device] session error {ip}: {err!r} (last sent {s.last_cmd!r}, last received {s.last_rx!r})")
         finally:
+            self.connections -= 1
+            if initial_refresh:
+                initial_refresh.cancel()
+                await asyncio.gather(initial_refresh, return_exceptions=True)
             if s.device:
                 if self.sessions.get(s.device.mac) is s:
                     self.sessions.pop(s.device.mac, None)
@@ -251,16 +292,21 @@ class Hub:
         n = 0
         while True:
             n += 1
-            for s in list(self.sessions.values()):
+            async def poll(s):
                 if not s.device:
-                    continue
+                    return
                 try:
                     if not await s.refresh():
                         print(f"[device] {s.device.name} poll timeout")
+                        s.device.online = False
+                        s.writer.close()
                     elif n % DIAG_EVERY == 0:
                         await s.diagnostics()
                 except Exception as err:
                     print(f"[device] poll error: {err!r}")
+                    s.device.online = False
+                    s.writer.close()
+            await asyncio.gather(*(poll(s) for s in list(self.sessions.values())))
             await asyncio.sleep(POLL_SECONDS)
 
 
@@ -277,6 +323,9 @@ h1{font-size:20px;margin:0}
 .card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:16px}
 .card.off{opacity:.45}
 .head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.head button{width:auto;padding:10px 16px;flex-shrink:0}
+#error{color:#ffb4ab;margin:8px 0 16px}
+#error:empty{display:none}
 .mac{font-weight:600}
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:#c0392b}
 .dot.on{background:var(--on)}
@@ -284,34 +333,85 @@ h1{font-size:20px;margin:0}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 button{border:0;border-radius:12px;padding:14px 10px;font:inherit;color:var(--fg);background:var(--off);text-align:left;width:100%;cursor:pointer}
 button.on{background:var(--on);color:#06130a}
+button:disabled{cursor:default;opacity:.6}
 button small{display:block;opacity:.85;font-size:12px}
 </style>
 <h1>powerk</h1>
 <div class=hint id=hint></div>
+<div role=alert id=error></div>
 <div id=app></div>
 <script>
-const api=async(p,b)=>(await fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:undefined)).json();
-const cmd=(mac,outlet,on)=>{api('api/onoff',{mac,outlet,on}).catch(()=>{}).then(refresh)};
+const token=new URLSearchParams(location.search).get('t')||'';
+if(token) history.replaceState(null,'',location.pathname);
+let busy=false, healthy=false, snapshot=null;
+const error=document.getElementById('error');
+async function api(p,b){
+  const response=await fetch(p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json','X-Token':token},
+    body:b?JSON.stringify(b):undefined,signal:AbortSignal.timeout(12000)});
+  const text=await response.text();
+  if(!response.ok){let message=`HTTP ${response.status}`;try{message=JSON.parse(text).error||message}catch(e){}throw Error(message)}
+  return JSON.parse(text);
+}
+async function cmd(mac,outlet,on){
+  if(busy||!healthy)return;
+  busy=true;render(snapshot);error.textContent='Sending command…';
+  try{const result=await api('api/onoff',{mac,outlet,on});if(!result.confirmed)throw Error('Outlet state was not confirmed');error.textContent='';await refresh()}
+  catch(e){error.textContent=e.message}
+  finally{busy=false;render(snapshot)}
+}
+function node(tag,text,parent){const el=document.createElement(tag);el.textContent=text;parent.append(el);return el}
 function render(s){
+  if(!s)return;
   document.getElementById('hint').textContent =
     `server ${s.local_ip} | strip connects to TCP ${s.port} | provision with: powerk.py provision --ip ${s.local_ip}`;
-  document.getElementById('app').innerHTML = s.devices.map(d=>`
-  <div class="card${d.online?'':' off'}">
-    <div class=head>
-      <span class=mac>${d.name} <span class="dot${d.online?' on':''}"></span></span>
-      <button class="on-off${d.on?' on':''}" onclick="cmd('${d.mac}',0,${!d.on})" style="width:auto;padding:10px 16px">${d.on?'ALL OFF':'ALL ON'}</button>
-    </div>
-    <div class=stats>${d.model} fw ${d.fw} | ${d.power_w} W | ${d.energy_kwh} kWh${d.voltage?` | ${d.voltage} V | ${d.current_a} A`:''}${d.rssi?` | wifi ${d.rssi} dBm`:''}</div>
-    <div class=grid>${d.outlets.map(o=>`
-      <button class="${o.on?'on':''}" onclick="cmd('${d.mac}',${o.n},${!o.on})">Outlet ${o.n}
-        <small>${o.on?'ON':'OFF'} | ${o.power_w} W | ${o.temp_c} C</small></button>`).join('')}
-    </div>
-  </div>`).join('') || '<div class=card>No strip connected yet. Run the provision command, then power-cycle the strip.</div>';
+  const app=document.getElementById('app');app.replaceChildren();
+  for(const d of s.devices){
+    const online=d.online&&healthy;
+    const card=node('div','',app);card.className=online?'card':'card off';
+    const head=node('div','',card);head.className='head';
+    node('span',`${d.name} · ${online?'online':'offline / stale'}`,head).className='mac';
+    const all=node('button',d.on?'ALL OFF':'ALL ON',head);
+    all.className=d.on?'on':'';
+    all.disabled=busy||!online;all.onclick=()=>cmd(d.mac,0,!d.on);
+    const seen=d.last_seen?new Date(d.last_seen*1000).toLocaleTimeString():'never';
+    node('div',`${d.model} fw ${d.fw} | ${d.power_w} W | ${d.energy_kwh} kWh | ${d.voltage??'—'} V | ${d.current_a??'—'} A | wifi ${d.rssi??'—'} dBm | last update ${seen}`,card).className='stats';
+    const grid=node('div','',card);grid.className='grid';
+    for(const o of d.outlets){
+      const button=node('button',`Outlet ${o.n}`,grid);button.className=o.on?'on':'';
+      button.disabled=busy||!online;button.onclick=()=>cmd(d.mac,o.n,!o.on);
+      node('small',`${o.on?'ON':'OFF'} | ${o.power_w} W | ${o.temp_c} C`,button);
+    }
+  }
+  if(!s.devices.length)node('div','No strip connected yet. Provision the strip, then power-cycle it.',app).className='card';
 }
-async function refresh(){try{render(await api('api/state'))}catch(e){}}
-refresh();setInterval(refresh,2000);
+async function refresh(){try{snapshot=await api('api/state');healthy=true;if(!busy)error.textContent='';render(snapshot)}catch(e){healthy=false;error.textContent=`Connection lost: ${e.message}`;render(snapshot)}}
+async function poll(){if(!busy)await refresh();setTimeout(poll,2000)}poll();
 </script>
 """
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self.workers = threading.BoundedSemaphore(16)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.workers.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.workers.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.workers.release()
 
 
 class Web(BaseHTTPRequestHandler):
@@ -320,6 +420,10 @@ class Web(BaseHTTPRequestHandler):
     local_ip: str
     port: int
     token: str = ""
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(3)
 
     def log_message(self, fmt, *args):
         pass
@@ -362,8 +466,14 @@ class Web(BaseHTTPRequestHandler):
         if path not in ("/powerk.py", "/powerk.apk") and not self._authorized():
             self._deny()
             return
-        if path.startswith("/api/state"):
-            snap = self.hub.snapshot()
+        if path == "/api/state":
+            future = asyncio.run_coroutine_threadsafe(self.hub.state(), self.loop)
+            try:
+                snap = future.result(timeout=2)
+            except Exception:
+                future.cancel()
+                self._json({"error": "state unavailable"}, 503)
+                return
             snap["local_ip"], snap["port"] = self.local_ip, self.port
             self._json(snap)
         elif path in ("/", "/index.html"):
@@ -397,36 +507,46 @@ class Web(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
-        if not urlparse(self.path).path.startswith("/api/onoff"):
+        if urlparse(self.path).path != "/api/onoff":
             self._json({"error": "not found"}, 404)
             return
         if not self._authorized():
             self._deny()
             return
         try:
-            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            mac = str(req["mac"]).upper()
-            outlet = int(req["outlet"])
-            on = bool(req["on"])
-        except Exception:
+            length = int(self.headers.get("Content-Length", "0"))
+            if self.headers.get("Transfer-Encoding") or not 0 < length <= MAX_BODY:
+                raise ValueError("invalid body length")
+            self.connection.settimeout(3)
+            req = json.loads(self.rfile.read(length))
+            if not isinstance(req, dict) or not isinstance(req.get("mac"), str):
+                raise ValueError("invalid device")
+            mac = req["mac"].upper()
+            outlet, on = req.get("outlet"), req.get("on")
+            if (not re.fullmatch(r"[0-9A-F]{12}", mac) or type(outlet) is not int
+                    or outlet not in range(5) or type(on) is not bool):
+                raise ValueError("invalid command")
+        except (ValueError, TypeError, OSError):
             self._json({"error": "bad request"}, 400)
             return
 
-        s = self.hub.session(mac)
-        if not s:
+        channels = [1, 2, 3, 4] if outlet == 0 else [outlet]
+        fut = asyncio.run_coroutine_threadsafe(self.hub.command(mac, channels, on), self.loop)
+        try:
+            ok = fut.result(timeout=COMMAND_TIMEOUT + 1)
+        except ConnectionError:
             self._json({"error": "device offline"}, 503)
             return
-        channels = [1, 2, 3, 4] if outlet == 0 else [outlet]
-        if not set(channels) <= {1, 2, 3, 4}:
-            self._json({"error": "bad outlet"}, 400)
+        except (asyncio.TimeoutError, FutureTimeoutError):
+            fut.cancel()
+            self._json({"error": "command timed out; refresh state before retrying"}, 504)
             return
-        try:
-            fut = asyncio.run_coroutine_threadsafe(s.set_outlets(channels, on), self.loop)
-            ok = fut.result(timeout=10)
-        except Exception as err:
-            self._json({"error": f"command failed: {err}"}, 502)
+        except Exception:
+            fut.cancel()
+            self._json({"error": "command failed"}, 502)
             return
-        self._json({"ok": bool(ok), "confirmed": ok})
+        self._json({"ok": bool(ok), "confirmed": ok,
+                    **({} if ok else {"error": "outlet state was not confirmed"})}, 200 if ok else 502)
 
 
 def local_ipv4s() -> list[str]:
@@ -453,7 +573,7 @@ def setup_command(cmd: str, expect: str, host: str, timeout: float = 6.0) -> str
             buf += chunk
     text = buf.decode("utf-8", "replace").strip()
     if expect and expect not in text:
-        raise SystemExit(f"strip answered {text!r}, expected {expect!r} (command {cmd!r})")
+        raise SystemExit(f"strip answered {text!r}, expected {expect!r}")
     return text
 
 
@@ -499,14 +619,14 @@ def cmd_provision(args) -> int:
 
 
 async def cmd_serve(args) -> int:
-    hub = Hub()
-    server = await asyncio.start_server(hub.handle_client, "0.0.0.0", args.port)
+    hub = Hub(set(args.allow_device))
+    server = await asyncio.start_server(hub.handle_client, args.device_bind, args.port, limit=8192)
     candidates = local_ipv4s()
     ip = args.ip or (candidates or ["127.0.0.1"])[0]
 
     Web.hub, Web.loop, Web.local_ip, Web.port = hub, asyncio.get_running_loop(), ip, args.port
     Web.token = args.token
-    httpd = ThreadingHTTPServer(("0.0.0.0", args.web_port), Web)
+    httpd = BoundedHTTPServer((args.web_bind, args.web_port), Web)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
@@ -522,8 +642,14 @@ async def cmd_serve(args) -> int:
     if len(candidates) > 1 and not args.ip:
         print(f"  other local IPs: {', '.join(c for c in candidates if c != ip)}  (pick one with --ip if wrong)")
     print("  Ctrl+C to stop")
-    async with server:
-        await hub.poll_loop()
+    try:
+        async with server:
+            await hub.poll_loop()
+    finally:
+        await asyncio.get_running_loop().run_in_executor(None, httpd.shutdown)
+        httpd.server_close()
+        for session in list(hub.sessions.values()):
+            session.writer.close()
     return 0
 
 
@@ -584,6 +710,12 @@ async def _selftest() -> None:
     print("selftest: parser + command round-trip OK")
 
 
+def device_mac(value: str) -> str:
+    if not re.fullmatch(r"[0-9A-Fa-f]{12}", value):
+        raise argparse.ArgumentTypeError("device MAC must contain exactly 12 hexadecimal characters")
+    return value.upper()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
@@ -592,6 +724,9 @@ def main() -> int:
     s.add_argument("--web-port", type=int, default=WEB_PORT)
     s.add_argument("--ip", help="IP to print in the UI/provision hint (default: auto-detect)")
     s.add_argument("--token", default="", help="require this token (password) for the web UI/API; use it whenever the port is reachable from the internet")
+    s.add_argument("--allow-device", action="append", default=[], type=device_mac, help="allowed 12-hex MAC; repeat for multiple strips (enrollment filter, not authentication)")
+    s.add_argument("--web-bind", default="0.0.0.0", help="web listener address; use 127.0.0.1 behind an HTTPS proxy")
+    s.add_argument("--device-bind", default="0.0.0.0", help="device listener address")
     p = sub.add_parser("provision", help="send home Wi-Fi + this PC's IP to a strip in setup mode")
     p.add_argument("--ip", help="IPv4 this PC will have on the home Wi-Fi (what the strip connects to)")
     p.add_argument("--ssid", required=True)
@@ -599,17 +734,15 @@ def main() -> int:
     p.add_argument("--host", default=SETUP_HOST, help=f"strip setup address (default {SETUP_HOST})")
     p.add_argument("--wait", type=float, default=20.0, help="seconds to wait for the strip setup service")
     sub.add_parser("selftest", help="offline protocol check")
-    args = ap.parse_args()
+    argv = sys.argv[1:] or ["serve"]
+    args = ap.parse_args(argv)
 
     if args.cmd == "provision":
         return cmd_provision(args)
     if args.cmd == "selftest":
         asyncio.run(_selftest())
         return 0
-    if args.cmd in (None, "serve"):
-        args.port = getattr(args, "port", DEVICE_PORT)
-        args.web_port = getattr(args, "web_port", WEB_PORT)
-        args.ip = getattr(args, "ip", None)
+    if args.cmd == "serve":
         try:
             return asyncio.run(cmd_serve(args))
         except KeyboardInterrupt:

@@ -257,9 +257,22 @@ journalctl -u powerk -f      # [device] MTTL 91C0C4C model=lgutap fw=0.1.54-1.0.
 
 ### Keeping the UI private (optional but recommended)
 
-Port 10086 is fine to expose: control commands only ever travel server → strip,
-so a stranger who finds that port cannot switch anything. The **UI port** is the
-one that can turn your outlets on and off, so protect it:
+Protect both listeners. The strip's TCP protocol has no authentication or
+encryption: a client can claim a MAC address and send fabricated telemetry.
+Duplicate live sessions are rejected, but this does not authenticate a device.
+Keep TCP 10086 on a trusted LAN or route the home network through a VPN to the
+VPS; the strip itself cannot run a VPN client. If public exposure is unavoidable,
+restrict source addresses in the firewall where possible and enroll known MACs:
+
+```bash
+python powerk.py serve --token YOUR_TOKEN --allow-device AABBCCDDEEFF
+```
+
+Repeat `--allow-device` for multiple strips. Without this flag, any MAC can enroll
+(convenient for initial LAN setup). An allowlist is a filter, not authentication;
+an attacker who knows an allowed MAC can still impersonate a disconnected strip.
+The server bounds incoming connections and closes unresponsive device sessions.
+Protect the web UI/API as well:
 
 * **Token** (`--token`) — required for every page/API call. Without it the UI is
   open to anyone who finds the port.
@@ -270,7 +283,12 @@ one that can turn your outlets on and off, so protect it:
   encrypted.
 * Cleartext HTTP means the token is visible to anyone on the network path. If that
   matters, put your existing nginx/Apache in front as an HTTPS reverse proxy (or
-  use the VPN option above).
+  use the VPN option above). Bind the backend with `--web-bind 127.0.0.1` and
+  enable **Use HTTPS** in Android settings with the proxy's host and port. A
+  trusted certificate is required; certificate validation is never bypassed.
+
+`--device-bind` selects the TCP listener address; `--ip` only changes the address
+shown in the UI and provisioning hints, not either listener's bind address.
 
 ---
 
@@ -294,12 +312,14 @@ token, a connection Test, and a language switch.
 
 Behavior details:
 
-* Polls `/api/state` every 2 s; a press flips the tile immediately and shows a
+* Polls `/api/state` every 2 s while the app is visible; a press flips the tile immediately and shows a
   spinner in the switch while the strip confirms.
 * Commands are blocked per outlet while one is in flight — no toggle storms.
 * **Languages**: Arabic + English, following the phone by default; override in
   Settings (also appears in Android's per-app language menu).
 * Debug build, no signing setup — fine for personal use, not for the Play Store.
+* HTTP for trusted LANs; optional HTTPS for a reverse proxy with a trusted
+  certificate. Tokens are masked in settings and app backup is disabled.
 
 ---
 
@@ -321,6 +341,32 @@ When `--token` is set, every request needs it — any of:
 
 `/powerk.py` and `/powerk.apk` stay public on purpose, so a new phone can always
 download the app and a machine without Wi-Fi can always download the provisioner.
+
+Commands require a 12-hex MAC, an integer outlet `0..4`, and a JSON boolean `on`
+(strings such as `"false"` are rejected). Bodies are limited to 4 KiB. A command
+returns success only after all targeted relays report the requested state.
+Unconfirmed commands return 502, offline devices 503, and expired commands 504.
+The eight-second command deadline includes queueing; expiration cancels pending
+work, but cannot undo relay commands already sent. Refresh before retrying.
+State includes `last_seen`, the Unix timestamp of the latest complete status
+report. A failed device poll marks the strip offline and closes its session.
+The web UI disables offline/pending controls and reports connection failures.
+
+## Development and validation
+
+```bash
+python -m unittest discover -s tests -v
+python powerk.py selftest
+node --test tests/web_ui.test.cjs
+cd android
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+CI runs the Python suite on 3.8 and 3.12, web UI tests on Node 20, and Android unit tests, lint, and a debug
+build with JDK 17 and SDK 37. Reports and the debug APK are uploaded as artifacts.
+Tests use localhost fake strips and HTTP servers; they require no physical strip.
+There is no generated API specification; update both clients, tests, and the API
+reference here when changing the contract.
 
 ## Protocol reference
 

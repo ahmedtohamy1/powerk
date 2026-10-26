@@ -25,6 +25,8 @@ object Server {
         private set
     var token by mutableStateOf("")
         private set
+    var secure by mutableStateOf(false)
+        private set
 
     fun init(context: Context) {
         val p = context.applicationContext.getSharedPreferences("powerk", Context.MODE_PRIVATE)
@@ -32,21 +34,24 @@ object Server {
         host = p.getString("host", "").orEmpty()
         port = p.getInt("port", 8080)
         token = p.getString("token", "").orEmpty()
+        secure = p.getBoolean("secure", false)
     }
 
-    fun save(newHost: String, newPort: Int, newToken: String) {
+    fun save(newHost: String, newPort: Int, newToken: String, newSecure: Boolean) {
         host = newHost.trim()
         port = newPort.coerceIn(1, 65535)
         token = newToken.trim()
+        secure = newSecure
         prefs?.edit()
             ?.putString("host", host)
             ?.putInt("port", port)
             ?.putString("token", token)
+            ?.putBoolean("secure", secure)
             ?.apply()
     }
 
     val configured: Boolean get() = host.isNotBlank()
-    val base: String get() = "http://$host:$port"
+    val base: String get() = "${if (secure) "https" else "http"}://$host:$port"
 }
 
 /** In-app language: null follows the phone language. */

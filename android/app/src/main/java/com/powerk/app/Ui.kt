@@ -68,6 +68,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -95,15 +96,21 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlin.math.roundToInt
 
 @Composable
@@ -115,6 +122,7 @@ fun PowerkApp() {
     var showSplash by remember { mutableStateOf(true) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     // "mac:outlet" -> state we are switching to right now (optimistic UI while the strip answers)
     val pending = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -124,11 +132,14 @@ fun PowerkApp() {
         try {
             snapshot = Api.snapshot(Server.base, Server.token)
             error = null
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             error = e.message ?: e.javaClass.simpleName
             snapshot = null
+        } finally {
+            loading = false
         }
-        loading = false
     }
 
     LaunchedEffect(Unit) {
@@ -136,10 +147,13 @@ fun PowerkApp() {
         showSplash = false
     }
 
-    LaunchedEffect(tab, Server.host, Server.port, Server.token) {
-        while (true) {
-            refresh()
-            delay(2000)
+    LaunchedEffect(lifecycle, Server.host, Server.port, Server.token, Server.secure) {
+        snapshot = null
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                refresh()
+                delay(2000)
+            }
         }
     }
 
@@ -151,6 +165,8 @@ fun PowerkApp() {
             try {
                 Api.setOutlet(Server.base, Server.token, mac, outlet, on)
                 refresh()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 snackbar.showSnackbar(e.message ?: "command failed")
             } finally {
@@ -741,14 +757,16 @@ private fun SettingsScreen() {
     var host by remember { mutableStateOf(Server.host) }
     var port by remember { mutableStateOf(Server.port.toString()) }
     var token by remember { mutableStateOf(Server.token) }
+    var secure by remember { mutableStateOf(Server.secure) }
     var status by remember { mutableStateOf<String?>(null) }
     var statusOk by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var lang by remember { mutableStateOf(Lang.code) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val resources = LocalResources.current
 
-    fun commit() = Server.save(host, port.toIntOrNull() ?: 8080, token)
+    fun commit() = Server.save(host, port.toIntOrNull() ?: 8080, token, secure)
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
@@ -823,16 +841,21 @@ private fun SettingsScreen() {
                             value = token,
                             onValueChange = { token = it },
                             label = { Text(stringResource(R.string.field_token)) },
+                            visualTransformation = PasswordVisualTransformation(),
                             singleLine = true,
                             modifier = Modifier.weight(1.4f),
                         )
                     }
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.use_https), Modifier.weight(1f))
+                    Switch(checked = secure, onCheckedChange = { secure = it })
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(
                         onClick = {
                             commit()
-                            status = context.getString(R.string.saved)
+                            status = resources.getString(R.string.saved)
                             statusOk = true
                         },
                         modifier = Modifier.weight(1f),
@@ -846,12 +869,14 @@ private fun SettingsScreen() {
                             scope.launch {
                                 try {
                                     val snap = Api.snapshot(Server.base, Server.token)
-                                    status = context.getString(
+                                    status = resources.getString(
                                         R.string.connected_summary,
                                         snap.strips.size,
                                         snap.strips.count { it.online },
                                     )
                                     statusOk = true
+                                } catch (e: CancellationException) {
+                                    throw e
                                 } catch (e: Exception) {
                                     status = e.message ?: "connection failed"
                                     statusOk = false

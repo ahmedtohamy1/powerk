@@ -57,4 +57,5 @@
     <string name="setup_step_3">وجّه المشترك للجهاز ده مرة واحدة:</string>
     <string name="setup_step_4">كده خلصنا — المشترك هيتصل لوحده. مش محتاج تغيّر DNS الراوتر ولا تفتح أي منافذ.</string>
     <string name="setup_footer">تطبيق الأندرويد بيستخدم نفس واجهة JSON اللي بتستخدمها واجهة الويب.</string>
+    <string name="use_https">استخدام HTTPS (يتطلب شهادة خادم موثوقة)</string>
 </resources>
