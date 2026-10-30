@@ -27,14 +27,14 @@ jobs:
       - run: python powerk.py selftest
 
   web:
-    name: Web UI regression tests
+    name: Web UI and design guidelines
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: node --test tests/web_ui.test.cjs
+      - run: node --test tests/*.test.cjs
 
   android:
     name: Android tests, lint and debug APK

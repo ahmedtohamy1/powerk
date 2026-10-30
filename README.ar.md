@@ -297,7 +297,7 @@ JSON منطقية لـ `on`؛ النص `"false"` مرفوض. الحد الأقص
 ```bash
 python -m unittest discover -s tests -v
 python powerk.py selftest
-node --test tests/web_ui.test.cjs
+node --test tests/*.test.cjs
 cd android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
@@ -339,6 +339,10 @@ gradlew assembleDebug            # أو افتح المجلد في Android Studi
 ---
 
 ## واجهة الويب و API
+
+تخضع تعديلات الواجهة لقواعد [UI_GUIDELINES.md](UI_GUIDELINES.md): ألوان محايدة
+ولمسات زرقاء محدودة، ومقاييس موحّدة للنصوص والمسافات وأحجام التحكم. يتحقق CI
+من رموز التصميم والتباين في المظهرين، إلى جانب اختبارات التفاعل.
 
 تعرض لوحة التحكم المتجاوبة القدرة الحالية، وعدد المقابس العاملة، وقراءات الطاقة
 التراكمية للمشترك. لكل مشترك مفاتيح مستقلة للمقابس وزران منفصلان **All on**

@@ -364,10 +364,15 @@ The web UI disables offline/pending controls and reports connection failures.
 
 ## Development and validation
 
+For UI changes, follow [UI_GUIDELINES.md](UI_GUIDELINES.md). It defines the neutral
+palette, restrained blue accent, typography and spacing scales, accessible
+controls, and required visual review. CI checks the tokens and contrast in both
+themes alongside interaction behavior.
+
 ```bash
 python -m unittest discover -s tests -v
 python powerk.py selftest
-node --test tests/web_ui.test.cjs
+node --test tests/*.test.cjs
 cd android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
