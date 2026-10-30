@@ -4,6 +4,9 @@
 __pycache__/
 *.py[cod]
 *.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # ---- secrets ----
 # tokens / passwords / local credentials (pass them on the command line instead)

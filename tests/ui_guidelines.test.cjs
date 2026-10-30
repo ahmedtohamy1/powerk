@@ -62,6 +62,7 @@ for (const [name, theme] of Object.entries(themes)) {
     }
     checkPair(theme, '--accent-ink', '--accent-soft', 4.5);
     checkPair(theme, '--danger', '--danger-bg', 4.5);
+    checkPair(theme, '--danger', '--surface', 4.5);
   });
 
   test(`${name} theme controls and switch states achieve 3:1 contrast`, () => {
@@ -110,7 +111,7 @@ test('controls keep minimum hit areas, visible focus and reduced-motion support'
   assert.equal(roots[0]['--control-size'], '44px');
   assert.equal(roots[0]['--control-wide'], '52px');
   assert.equal(roots[0]['--duration-fast'], '160ms');
-  for (const selector of ['button', '.actions button', '.toggle', 'summary']) {
+  for (const selector of ['button', '.actions button', '.toggle', 'summary', 'select']) {
     const rule = rules.find(rule => rule.selector === selector);
     assert.equal(rule.values['min-height'], 'var(--control-size)', selector);
     for (const override of rules.filter(rule => rule.selector === selector && rule.values['min-height'])) {

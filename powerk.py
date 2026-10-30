@@ -16,16 +16,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import csv
+import io
 import ipaddress
 import json
+import math
+import queue
 import re
 import secrets
+import signal
 import socket
+import sqlite3
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -38,6 +46,8 @@ DIAG_EVERY = 3                  # voltage/current/RSSI every 3rd poll
 COMMAND_TIMEOUT = 8.0
 CLIENT_TIMEOUT = 20.0
 MAX_BODY = 4096
+HISTORY_INTERVAL = 30.0
+HISTORY_DB = Path(__file__).resolve().parent / "data" / "history.sqlite3"
 
 BOOTINFO_RE = re.compile(
     r"^up:bootinfo:([^;\r\n]+);([0-9A-Fa-f]{12});([0-9A-Fa-f]{12});([^;\r\n]+);connect$"
@@ -75,6 +85,234 @@ def parse_getinfo(line: str) -> list[dict]:
             "temp_c": int(g["temperature"]),
         })
     return out
+
+
+class History:
+    """Durable per-outlet samples. A bounded writer queue keeps disk I/O off TCP handling."""
+
+    CSV_FIELDS = ("timestamp_utc", "unix_seconds", "mac", "outlet", "relay_on", "power_w",
+                  "energy_counter_wh", "temperature_c", "voltage_v", "rssi_dbm",
+                  "previous_timestamp_utc", "interval_seconds", "energy_delta_wh", "quality")
+
+    def __init__(self, path: str | Path, interval: float = HISTORY_INTERVAL):
+        self.path = Path(path).expanduser().resolve()
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.interval = interval
+        self.pending = queue.Queue(maxsize=128)
+        self.worker: threading.Thread | None = None
+        self.write_lock = threading.Lock()
+        self.status_lock = threading.Lock()
+        self.accepting = False
+        with closing(self.connect()) as db:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, 1):
+                raise ValueError("unsupported history database version")
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS history_devices (
+                    mac TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL,
+                    firmware TEXT NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS readings (
+                    recorded_at REAL NOT NULL, mac TEXT NOT NULL, outlet INTEGER NOT NULL,
+                    relay_on INTEGER NOT NULL, power_w REAL NOT NULL, counter_wh INTEGER NOT NULL,
+                    temperature_c INTEGER NOT NULL, voltage_v REAL, rssi_dbm INTEGER,
+                    previous_at REAL, interval_seconds REAL, delta_wh INTEGER,
+                    quality TEXT NOT NULL CHECK(quality IN ('baseline','ok','gap','reset')),
+                    PRIMARY KEY(mac, outlet, recorded_at)
+                );
+                CREATE INDEX IF NOT EXISTS readings_time ON readings(recorded_at);
+                PRAGMA user_version=1;
+            """)
+            last, count = db.execute("SELECT MAX(recorded_at), COUNT(*) FROM readings").fetchone()
+        self._status = {"enabled": True, "interval_seconds": interval,
+                        "last_recorded_at": last, "readings_saved": count,
+                        "failed_snapshots": 0, "error": None}
+
+    def connect(self):
+        db = sqlite3.connect(str(self.path), timeout=2)
+        db.row_factory = sqlite3.Row
+        return db
+
+    def status(self) -> dict:
+        with self.status_lock:
+            return dict(self._status)
+
+    def start(self) -> None:
+        self.accepting = True
+        self.worker = threading.Thread(target=self._write_loop, name="powerk-history", daemon=True)
+        self.worker.start()
+
+    def _failed(self, message: str) -> None:
+        with self.status_lock:
+            self._status = {**self._status, "error": message,
+                            "failed_snapshots": self._status["failed_snapshots"] + 1}
+
+    def submit(self, snapshot: dict) -> None:
+        if not self.accepting:
+            return
+        try:
+            self.pending.put_nowait(snapshot)
+        except queue.Full:
+            self._failed("History queue full; some readings were not saved")
+
+    def _write_loop(self) -> None:
+        while True:
+            item = self.pending.get()
+            try:
+                if item is None:
+                    return
+                self.record(item)
+            except Exception as error:
+                self._failed("History write failed; check the server log")
+                print(f"[history] write failed: {error!r}")
+            finally:
+                self.pending.task_done()
+
+    def close(self) -> None:
+        self.accepting = False
+        if self.worker:
+            self.pending.put(None)
+            self.worker.join(timeout=10)
+            if self.worker.is_alive():
+                raise RuntimeError("history writer did not finish flushing queued readings")
+            self.worker = None
+
+    def record(self, sample: dict) -> bool:
+        """Save only fresh, complete snapshots; first samples and resets never add usage."""
+        if not sample.get("online"):
+            return False
+        at = sample["last_seen"]
+        outlets = sample["outlets"]
+        if not isinstance(at, (float, int)) or not math.isfinite(at) or at < 0:
+            raise ValueError("invalid sample timestamp")
+        if len(outlets) != 4 or {o["n"] for o in outlets} != {1, 2, 3, 4}:
+            raise ValueError("history requires four distinct outlets")
+        mac = sample["mac"]
+        with self.write_lock, closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = {o["n"]: db.execute(
+                "SELECT recorded_at, counter_wh FROM readings WHERE mac=? AND outlet=? "
+                "ORDER BY recorded_at DESC LIMIT 1", (mac, o["n"])).fetchone() for o in outlets}
+            latest = max((row["recorded_at"] for row in previous.values() if row), default=None)
+            counters = {o["n"]: int(round(o["energy_kwh"] * 1000)) for o in outlets}
+            if any(value < 0 for value in counters.values()):
+                raise ValueError("negative energy counter")
+            reset = any(row and counters[n] < row["counter_wh"] for n, row in previous.items())
+            if latest is not None and (at <= latest or (at - latest < self.interval and not reset)):
+                return False
+            rows = []
+            for outlet in outlets:
+                prev = previous[outlet["n"]]
+                elapsed = at - prev["recorded_at"] if prev else None
+                delta = counters[outlet["n"]] - prev["counter_wh"] if prev else None
+                if prev is None:
+                    quality = "baseline"
+                elif delta < 0:
+                    quality = "reset"
+                    delta = None
+                elif elapsed > max(120, self.interval * 3):
+                    quality = "gap"
+                else:
+                    quality = "ok"
+                rows.append((at, mac, outlet["n"], int(outlet["on"]), outlet["power_w"],
+                             counters[outlet["n"]], outlet["temp_c"], sample.get("voltage"),
+                             sample.get("rssi"), prev["recorded_at"] if prev else None,
+                             elapsed, delta, quality))
+            db.executemany("INSERT INTO readings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            db.execute("INSERT INTO history_devices VALUES (?,?,?,?,?,?) ON CONFLICT(mac) DO UPDATE SET "
+                       "name=excluded.name, model=excluded.model, firmware=excluded.firmware, last_seen=excluded.last_seen",
+                       (mac, sample["name"], sample["model"], sample["fw"], at, at))
+        with self.status_lock:
+            self._status = {**self._status, "last_recorded_at": max(at, self._status["last_recorded_at"] or at),
+                            "readings_saved": self._status["readings_saved"] + 4, "error": None}
+        return True
+
+    @staticmethod
+    def parameters(query: str) -> dict:
+        values = parse_qs(query, keep_blank_values=True, max_num_fields=12)
+        allowed = {"start", "end", "mac", "outlet", "bucket", "t"}
+        if set(values) - allowed or any(len(value) != 1 for value in values.values()):
+            raise ValueError("unknown or repeated history parameter")
+        now = time.time()
+        start = float(values.get("start", [now - 7 * 86400])[0])
+        end = float(values.get("end", [now])[0])
+        if not all(math.isfinite(t) for t in (start, end)) or start < 0 or not start < end or end - start > 366 * 86400:
+            raise ValueError("use a start/end range of at most 366 days (Unix seconds)")
+        mac = values.get("mac", [""])[0].upper()
+        if mac and not re.fullmatch(r"[0-9A-F]{12}", mac):
+            raise ValueError("invalid history device")
+        outlet = values.get("outlet", [""])[0]
+        if outlet not in ("", "1", "2", "3", "4"):
+            raise ValueError("history outlet must be 1..4")
+        bucket = values.get("bucket", ["day"])[0]
+        if bucket not in ("hour", "day"):
+            raise ValueError("history bucket must be hour or day")
+        return {"start": start, "end": end, "mac": mac,
+                "outlet": int(outlet) if outlet else None, "bucket": bucket}
+
+    @staticmethod
+    def where(params: dict):
+        clause = "recorded_at >= ? AND recorded_at < ?"
+        args = [params["start"], params["end"]]
+        for key in ("mac", "outlet"):
+            if params[key]:
+                clause += f" AND {key}=?"
+                args.append(params[key])
+        return clause, args
+
+    def report(self, params: dict) -> dict:
+        clause, args = self.where(params)
+        bucket_seconds = 3600 if params["bucket"] == "hour" else 86400
+        # A delta belongs to the selected period only if both observations are inside it.
+        valid = "CASE WHEN previous_at >= ? THEN COALESCE(delta_wh,0) ELSE 0 END"
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            summary = dict(db.execute(f"SELECT COUNT(*) AS readings, SUM({valid}) / 1000.0 AS energy_kwh, "
+                "SUM(quality='reset') AS resets, SUM(quality='gap') AS gaps, "
+                "MIN(recorded_at) AS first_sample, MAX(recorded_at) AS last_sample "
+                f"FROM readings WHERE {clause}", [params["start"], *args]).fetchone())
+            buckets = [dict(row) for row in db.execute(
+                f"SELECT CAST(recorded_at / ? AS INTEGER) * ? AS timestamp, COUNT(*) AS readings, "
+                f"SUM(CASE WHEN previous_at >= CAST(recorded_at / ? AS INTEGER) * ? AND previous_at >= ? "
+                "THEN COALESCE(delta_wh,0) ELSE 0 END) / 1000.0 AS energy_kwh, "
+                "SUM(quality='reset') AS resets, SUM(quality='gap') AS gaps "
+                f"FROM readings WHERE {clause} GROUP BY timestamp ORDER BY timestamp",
+                [bucket_seconds, bucket_seconds, bucket_seconds, bucket_seconds, params["start"], *args])]
+            devices = [dict(row) for row in db.execute("SELECT * FROM history_devices ORDER BY name, mac")]
+        for key in ("energy_kwh", "resets", "gaps"):
+            summary[key] = summary[key] or 0
+        summary["unallocated_energy_kwh"] = round(summary["energy_kwh"] - sum(b["energy_kwh"] for b in buckets), 6)
+        return {"start": params["start"], "end": params["end"], "bucket": params["bucket"],
+                "timezone": "UTC", "summary": summary, "buckets": buckets, "devices": devices}
+
+    @staticmethod
+    def iso(timestamp) -> str:
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat() if timestamp is not None else ""
+
+    def csv_chunks(self, params: dict):
+        """Stream a consistent raw export without buffering it or blocking the writer."""
+        clause, args = self.where(params)
+        with closing(self.connect()) as db:
+            db.execute("PRAGMA query_only=ON")
+            cursor = db.execute(f"SELECT * FROM readings WHERE {clause} ORDER BY recorded_at, mac, outlet", args)
+            buffer = io.StringIO(newline="")
+            writer = csv.writer(buffer)
+            writer.writerow(self.CSV_FIELDS)
+            yield buffer.getvalue().encode("utf-8")
+            while True:
+                rows = cursor.fetchmany(500)
+                if not rows:
+                    return
+                buffer.seek(0)
+                buffer.truncate(0)
+                for row in rows:
+                    writer.writerow((self.iso(row["recorded_at"]), row["recorded_at"], row["mac"],
+                        row["outlet"], row["relay_on"], row["power_w"], row["counter_wh"],
+                        row["temperature_c"], row["voltage_v"], row["rssi_dbm"],
+                        self.iso(row["previous_at"]), row["interval_seconds"], row["delta_wh"], row["quality"]))
+                yield buffer.getvalue().encode("utf-8")
 
 
 class Device:
@@ -164,11 +402,12 @@ class Session:
 
 
 class Hub:
-    def __init__(self, allowed_devices: set[str] | None = None) -> None:
+    def __init__(self, allowed_devices: set[str] | None = None, history: History | None = None) -> None:
         self.devices: dict[str, Device] = {}
         self.sessions: dict[str, Session] = {}
         self.allowed_devices = allowed_devices or set()
         self.connections = 0
+        self.history = history
 
     def session(self, mac: str) -> Session | None:
         s = self.sessions.get(mac.upper())
@@ -177,7 +416,8 @@ class Hub:
         return None
 
     def snapshot(self) -> dict:
-        return {"devices": [d.snapshot() for d in self.devices.values()]}
+        return {"devices": [d.snapshot() for d in self.devices.values()],
+                "history": self.history.status() if self.history else {"enabled": False}}
 
     async def state(self) -> dict:
         # HTTP workers must read state on the event loop that owns it.
@@ -246,6 +486,8 @@ class Hub:
                         s.device.online = True
                         s.device.last_seen = time.time()
                         s.got_getinfo.set()
+                        if self.history:
+                            self.history.submit(s.device.snapshot())
                     continue
 
                 if line.lower().startswith("up:power_report:"):
@@ -399,7 +641,7 @@ button,summary,a{-webkit-tap-highlight-color:transparent}
 button{font:inherit;cursor:pointer;border:1px solid var(--control-border);border-radius:var(--radius-control);background:var(--surface);color:var(--ink);padding:var(--space-2) var(--space-4);min-height:var(--control-size);min-width:var(--control-size);transition:background var(--duration-fast),border-color var(--duration-fast)}
 button:hover:not(:disabled){background:var(--subtle);border-color:var(--accent)}
 button:disabled{cursor:default;opacity:.5}
-button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+button:focus-visible,summary:focus-visible,a:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
 [hidden]{display:none!important}
 .shell{max-width:var(--content-width);margin:0 auto;padding:0 var(--space-8)}
 .topbar{min-height:var(--header-size);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);gap:var(--space-4)}
@@ -472,6 +714,21 @@ summary{cursor:pointer;min-height:var(--control-size);align-content:center;font-
 .setup{margin-top:var(--space-6);border-top:1px solid var(--line);padding-top:var(--space-5);color:var(--muted);font-size:var(--text-sm)}
 .setup summary{font-size:var(--text-sm)}.setup p{max-width:650px}.setup code{display:block;background:var(--surface);border:1px solid var(--line);padding:var(--space-4);border-radius:var(--radius-control);overflow-wrap:anywhere;white-space:pre-wrap;color:var(--ink);font-size:var(--text-xs)}
 footer{display:flex;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;color:var(--muted);font-size:var(--text-xs);margin-top:var(--space-8)}
+.history{margin-top:var(--space-8);padding:var(--space-6);background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-panel);min-width:0}
+.history-filters{display:grid;grid-template-columns:1fr 2fr 1fr auto auto;align-items:end;gap:var(--space-3);margin:var(--space-5) 0}
+.history-filters label{display:grid;gap:var(--space-1);font-size:var(--text-xs);color:var(--muted);min-width:0}
+select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);border-radius:var(--radius-control);min-height:var(--control-size);min-width:0;max-width:100%;padding:var(--space-2)}
+.history-stats{display:flex;flex-wrap:wrap;gap:var(--space-6);padding:var(--space-4) 0;border-top:1px solid var(--line)}
+.history-stat strong{display:block;font-size:var(--text-xl);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums}
+.history-stat span,.history-message,.history-note{font-size:var(--text-xs);color:var(--muted)}
+.history-message[data-kind=error]{color:var(--danger)}
+.history-table-wrap{overflow-x:auto;max-width:100%}
+.history table{border-collapse:collapse;width:100%;min-width:480px;font-size:var(--text-xs);text-align:left;font-variant-numeric:tabular-nums}
+.history th,.history td{padding:var(--space-3);border-bottom:1px solid var(--line)}
+.history th{font-weight:var(--weight-semibold);color:var(--muted)}
+.history-note{margin:var(--space-3) 0 0}
+@media(max-width:760px){.history{padding:var(--space-5)}.history-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.history-device{grid-column:1/-1;grid-row:1}}
+@media(max-width:380px){.history{padding:var(--space-3)}}
 @media(max-width:760px){.shell{padding:0 var(--space-5)}.topbar{min-height:80px}.status{display:none}.overview{grid-template-columns:1fr 1fr;gap:var(--space-3)}.primary{grid-column:1/-1}.metric{padding:var(--space-5)}.metric-value{font-size:var(--text-3xl);margin-top:var(--space-4)}.metric-icon{top:var(--space-5);right:var(--space-5)}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.strip{padding:var(--space-5)}.intro{align-items:start;flex-direction:column;gap:var(--space-3)}main{padding-top:var(--space-8)}.outlet-top{margin-bottom:var(--space-4)}}
 @media(max-width:380px){.shell{padding:0 var(--space-3)}.top-actions{gap:var(--space-2)}.top-actions button{padding:var(--space-2);font-size:var(--text-xs)}.brand{font-size:var(--text-lg);gap:var(--space-2)}.strip{padding:var(--space-3)}.grid{gap:var(--space-2)}.outlet{padding:var(--space-3)}.socket{width:32px;height:32px}.socket::before,.socket::after{top:10px}.socket::before{left:8px}.socket::after{right:8px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
@@ -494,6 +751,27 @@ footer{display:flex;justify-content:space-between;gap:var(--space-3);flex-wrap:w
   <div class="section-heading"><h2>Your power strips</h2><span class="count" id="device-count">Connecting…</span></div>
   <div id="app"></div>
   <div class="empty" id="empty"><div class="empty-symbol" aria-hidden="true">⌁</div><h3 id="empty-title">Connecting to your home</h3><p id="empty-body">Your strips and their latest readings will appear here.</p><button id="setup-button" type="button">View connection setup</button></div>
+  <section class="history" aria-labelledby="history-title">
+    <div class="section-heading"><h2 id="history-title">Consumption history</h2><span class="pill" id="history-recording">Checking recorder…</span></div>
+    <p class="history-note" id="history-saved">Recording begins when the server receives a complete strip reading.</p>
+    <div class="history-filters">
+      <label>Period<select id="history-range"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option></select></label>
+      <label class="history-device">Power strip<select id="history-device"><option value="">All strips</option></select></label>
+      <label>Outlet<select id="history-outlet"><option value="">All outlets</option><option value="1">Outlet 1</option><option value="2">Outlet 2</option><option value="3">Outlet 3</option><option value="4">Outlet 4</option></select></label>
+      <button id="history-refresh" type="button">Refresh history</button><button id="history-export" type="button" disabled>Export CSV</button>
+    </div>
+    <p class="history-message" id="history-message" role="status" aria-live="polite">Waiting for saved readings.</p>
+    <div class="history-stats">
+      <div class="history-stat"><strong id="history-energy">—</strong><span>Metered increase (kWh)</span></div>
+      <div class="history-stat"><strong id="history-readings">—</strong><span>Saved outlet readings</span></div>
+      <div class="history-stat"><strong id="history-flags">—</strong><span>Flagged intervals</span></div>
+    </div>
+    <div class="history-table-wrap" tabindex="0" aria-label="Consumption history table; scroll horizontally on small screens">
+      <table><thead><tr><th scope="col">Period (UTC)</th><th scope="col">Increase (kWh)</th><th scope="col">Readings</th><th scope="col">Flags</th></tr></thead><tbody id="history-rows"></tbody></table>
+    </div>
+    <p class="history-note" id="history-boundaries" hidden></p>
+    <p class="history-note">Only complete observed intervals are counted. First readings establish a baseline; counter resets and long gaps are flagged. CSV contains raw measurements for later analysis.</p>
+  </section>
   <details class="setup" id="setup"><summary>Connection &amp; setup</summary><p id="hint">Waiting for server details.</p><p>To connect a new strip, provision it with this server's address while connected to the strip's setup Wi-Fi.</p><code id="provision">python powerk.py provision --ip SERVER_IP --ssid YOUR_WIFI --password YOUR_PASSWORD</code><p>Keep the strip connection on a trusted network. Refresh the dashboard after provisioning.</p></details>
   <footer><span>Local control. A direct connection.</span><span>Readings update automatically · No cloud account</span></footer>
 </main>
@@ -507,6 +785,8 @@ const views = new Map();
 let busy = false, healthy = false, snapshot = null, reading = false;
 let refreshTask = null;
 let commandMessage = '', commandKind = 'success';
+let historyGeneration = 0, lastHistoryFetch = 0, historyExportParams = null, exportingHistory = false;
+const historyDevices = new Map();
 function text(el, value) { if (el.textContent !== String(value)) el.textContent = String(value); }
 function notice(message, kind) { text(error, message); error.dataset.kind = kind; }
 function node(tag, value, parent, className = '') {
@@ -532,6 +812,106 @@ $('theme').onclick = () => {
 };
 $('setup-button').onclick = () => { $('setup').open = true; $('setup').scrollIntoView({block:'nearest'}); };
 $('refresh').onclick = () => refresh();
+for (const id of ['history-range', 'history-device', 'history-outlet']) $(id).onchange = () => loadHistory();
+$('history-refresh').onclick = () => loadHistory();
+$('history-export').onclick = () => exportHistory();
+
+function historyNotice(message, kind = '') {
+  text($('history-message'), message);
+  $('history-message').dataset.kind = kind;
+}
+function historyDeviceOptions(devices) {
+  for (const device of devices) {
+    if (!historyDevices.has(device.mac)) {
+      const option = node('option', '', $('history-device'));
+      option.value = device.mac;
+      historyDevices.set(device.mac, option);
+    }
+    text(historyDevices.get(device.mac), `${device.name} · ${device.mac.slice(-6)}`);
+  }
+}
+function updateRecording(status) {
+  if (!status?.enabled) {
+    text($('history-recording'), 'Recorder unavailable');
+    text($('history-saved'), 'Restart the server with consumption history enabled.');
+    return;
+  }
+  text($('history-recording'), status.error ? 'Storage error' : 'Recording');
+  const saved = status.last_recorded_at ? new Date(status.last_recorded_at * 1000).toLocaleString() : 'waiting for the first reading';
+  text($('history-saved'), `Saved every ${status.interval_seconds} seconds · Last saved: ${saved} · ${status.failed_snapshots || 0} failed snapshots`);
+  if (status.error) historyNotice(status.error, 'error');
+  historyDeviceOptions(snapshot.devices);
+  if (Date.now() - lastHistoryFetch >= 60000) loadHistory();
+}
+async function loadHistory() {
+  const generation = ++historyGeneration;
+  lastHistoryFetch = Date.now();
+  historyExportParams = null;
+  $('history-export').disabled = true;
+  historyNotice('Loading saved readings…');
+  const days = [1, 7, 30].includes(Number($('history-range').value)) ? Number($('history-range').value) : 7;
+  const end = Date.now() / 1000;
+  const params = new URLSearchParams({start:String(end - days * 86400), end:String(end), bucket:days === 1 ? 'hour' : 'day'});
+  if ($('history-device').value) params.set('mac', $('history-device').value);
+  if ($('history-outlet').value) params.set('outlet', $('history-outlet').value);
+  try {
+    const report = await api(`api/history?${params}`);
+    if (generation !== historyGeneration) return;
+    historyDeviceOptions(report.devices);
+    text($('history-energy'), format(report.summary.energy_kwh, 3));
+    text($('history-readings'), format(report.summary.readings, 0));
+    text($('history-flags'), format(report.summary.resets + report.summary.gaps, 0));
+    $('history-rows').replaceChildren();
+    for (const bucket of report.buckets) {
+      const row = node('tr', '', $('history-rows'));
+      const dateOptions = {timeZone:'UTC', month:'short', day:'numeric', year:'numeric'};
+      if (report.bucket === 'hour') Object.assign(dateOptions, {hour:'2-digit', minute:'2-digit'});
+      node('td', new Date(bucket.timestamp * 1000).toLocaleString(undefined, dateOptions), row);
+      node('td', format(bucket.energy_kwh, 3), row);
+      node('td', format(bucket.readings, 0), row);
+      node('td', format(bucket.resets + bucket.gaps, 0), row);
+    }
+    const unallocated = report.summary.unallocated_energy_kwh;
+    $('history-boundaries').hidden = !unallocated;
+    text($('history-boundaries'), `${format(unallocated, 3)} kWh spans bucket boundaries and is included in the period total only.`);
+    historyNotice(report.summary.readings ? 'Saved history · UTC buckets · CSV exports the selected period and outlets.' : 'No saved readings in this period. History starts from the first recorded sample.');
+    if (snapshot?.history?.error) historyNotice(snapshot.history.error, 'error');
+    historyExportParams = params.toString();
+    $('history-export').disabled = exportingHistory;
+  } catch (error) {
+    if (generation === historyGeneration) {
+      text($('history-energy'), '—');
+      text($('history-readings'), '—');
+      text($('history-flags'), '—');
+      $('history-rows').replaceChildren();
+      $('history-boundaries').hidden = true;
+      historyNotice(`History unavailable: ${error.message}`, 'error');
+    }
+  }
+}
+async function exportHistory() {
+  if (!historyExportParams || exportingHistory) return;
+  exportingHistory = true;
+  $('history-export').disabled = true;
+  const params = historyExportParams;
+  try {
+    const response = await fetch(`api/history.csv?${params}`, {headers:{'X-Token':token}, signal:AbortSignal.timeout(60000)});
+    if (!response.ok) throw Error(`HTTP ${response.status}`);
+    const url = URL.createObjectURL(await response.blob());
+    const link = node('a', '', document.body);
+    link.href = url;
+    link.download = 'powerk-history.csv';
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    historyNotice('CSV downloaded for the selected period and outlets.');
+  } catch (error) {
+    historyNotice(`Export failed: ${error.message}`, 'error');
+  } finally {
+    exportingHistory = false;
+    $('history-export').disabled = !historyExportParams;
+  }
+}
 async function api(path, body) {
   const response = await fetch(path, {
     method: body ? 'POST' : 'GET',
@@ -679,11 +1059,13 @@ async function fetchState() {
     text($('updated'), `Last synced ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}`);
     notice(commandMessage, commandKind);
     render(snapshot);
+    updateRecording(snapshot.history);
   } catch (e) {
     healthy = false;
     notice(`Connection lost: ${e.message}`, 'error');
     text($('connection'), 'Connection lost');
     $('connection').className = 'status';
+    text($('history-recording'), 'Recorder status unavailable');
     text($('updated'), 'Live updates paused · retrying automatically');
     if (snapshot) render(snapshot);
     else {
@@ -775,8 +1157,46 @@ class Web(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _history_response(self, path):
+        history = self.hub.history
+        if history is None:
+            self._json({"error": "history recording is not enabled"}, 503)
+            return
+        try:
+            params = History.parameters(urlparse(self.path).query)
+        except ValueError as error:
+            self._json({"error": str(error)}, 400)
+            return
+        if path == "/api/history":
+            try:
+                report = history.report(params)
+            except sqlite3.Error:
+                self._json({"error": "history storage unavailable"}, 503)
+                return
+            self._json(report)
+            return
+        with closing(history.csv_chunks(params)) as chunks:
+            try:
+                first = next(chunks)
+            except sqlite3.Error:
+                self._json({"error": "history storage unavailable"}, 503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="powerk-history.csv"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(first)
+                for chunk in chunks:
+                    self.wfile.write(chunk)
+            except (ConnectionError, OSError, sqlite3.Error):
+                self.close_connection = True
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -793,6 +1213,8 @@ class Web(BaseHTTPRequestHandler):
                 return
             snap["local_ip"], snap["port"] = self.local_ip, self.port
             self._json(snap)
+        elif path in ("/api/history", "/api/history.csv"):
+            self._history_response(path)
         elif path in ("/", "/index.html"):
             body = PAGE.encode()
             self.send_response(200)
@@ -936,20 +1358,46 @@ def cmd_provision(args) -> int:
 
 
 async def cmd_serve(args) -> int:
-    hub = Hub(set(args.allow_device))
+    history = History(args.history_db, args.history_interval)
+    history.start()
+    loop = asyncio.get_running_loop()
+    termination_handler = False
+    try:
+        loop.add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+        termination_handler = True
+    except (NotImplementedError, RuntimeError):
+        pass
+    try:
+        return await _run_server(args, history)
+    except asyncio.CancelledError:
+        return 0
+    finally:
+        await loop.run_in_executor(None, history.close)
+        if termination_handler:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+
+async def _run_server(args, history: History) -> int:
+    hub = Hub(set(args.allow_device), history=history)
     server = await asyncio.start_server(hub.handle_client, args.device_bind, args.port, limit=8192)
     candidates = local_ipv4s()
     ip = args.ip or (candidates or ["127.0.0.1"])[0]
 
     Web.hub, Web.loop, Web.local_ip, Web.port = hub, asyncio.get_running_loop(), ip, args.port
     Web.token = args.token
-    httpd = BoundedHTTPServer((args.web_bind, args.web_port), Web)
+    try:
+        httpd = BoundedHTTPServer((args.web_bind, args.web_port), Web)
+    except Exception:
+        server.close()
+        await server.wait_closed()
+        raise
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
     print(f"powerk")
     print(f"  web UI (phone/PC)  http://{ip}:{args.web_port}")
     print(f"  strip server       TCP {args.port}")
+    print(f"  consumption log    {history.path} (every {history.interval:g} seconds)")
     print(f"  auth               {'token required' if args.token else 'NONE - only safe on a trusted LAN'}")
     if args.token:
         print(f"                     browser: user 'powerk' + the token as password; app: Settings -> Token")
@@ -1033,6 +1481,13 @@ def device_mac(value: str) -> str:
     return value.upper()
 
 
+def history_interval(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or not 5 <= seconds <= 3600:
+        raise argparse.ArgumentTypeError("history interval must be between 5 and 3600 seconds")
+    return seconds
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
@@ -1044,6 +1499,8 @@ def main() -> int:
     s.add_argument("--allow-device", action="append", default=[], type=device_mac, help="allowed 12-hex MAC; repeat for multiple strips (enrollment filter, not authentication)")
     s.add_argument("--web-bind", default="0.0.0.0", help="web listener address; use 127.0.0.1 behind an HTTPS proxy")
     s.add_argument("--device-bind", default="0.0.0.0", help="device listener address")
+    s.add_argument("--history-db", default=str(HISTORY_DB), help="SQLite file for persistent consumption history")
+    s.add_argument("--history-interval", type=history_interval, default=HISTORY_INTERVAL, help="seconds between saved snapshots per strip (default: 30; range: 5..3600)")
     p = sub.add_parser("provision", help="send home Wi-Fi + this PC's IP to a strip in setup mode")
     p.add_argument("--ip", help="IPv4 this PC will have on the home Wi-Fi (what the strip connects to)")
     p.add_argument("--ssid", required=True)

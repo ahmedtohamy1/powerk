@@ -90,6 +90,15 @@ never use a colored glow. The muted divider `--line` is not a control boundary.
 - Use semantic headings, polite live announcements, and real disabled states.
   Offline readings must say they are stale and must not count toward live power.
   Distinguish pending, confirmed, and failed commands in text.
+- Keep history separate from device control. Use labeled period/device/outlet
+  selects with 44 px minimum height, explicit recording/error status, and a
+  semantic table. A history table may scroll inside its labeled container on
+  narrow screens; it must not cause page-level overflow.
+- Label history buckets as UTC. Do not present the strip's lifetime counter as
+  newly consumed energy, fill gaps with invented readings, or hide reset/gap
+  flags. Report intervals crossing bucket boundaries separately. Historical
+  devices remain selectable even when offline; history failures must not
+  disable live outlet controls.
 
 Contrast thresholds follow W3C's
 [text contrast guidance](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html)

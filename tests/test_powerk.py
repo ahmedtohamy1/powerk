@@ -4,7 +4,9 @@ import http.client
 import json
 import sys
 import threading
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import powerk
@@ -142,7 +144,10 @@ class DeviceTests(unittest.IsolatedAsyncioTestCase):
 
 class HttpTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.hub = powerk.Hub()
+        self.folder = tempfile.TemporaryDirectory()
+        self.history = powerk.History(Path(self.folder.name) / "history.sqlite3")
+        self.history.start()
+        self.hub = powerk.Hub(history=self.history)
         handler = type("TestWeb", (powerk.Web,), {
             "hub": self.hub, "loop": asyncio.get_running_loop(),
             "token": "secret", "local_ip": "127.0.0.1", "port": 10086,
@@ -155,6 +160,8 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.get_running_loop().run_in_executor(None, self.server.shutdown)
         self.server.server_close()
         self.thread.join(timeout=1)
+        await asyncio.get_running_loop().run_in_executor(None, self.history.close)
+        self.folder.cleanup()
 
     async def request(self, path="/api/onoff", body=None, token="secret", headers=None):
         def send():
@@ -179,6 +186,39 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_routes_are_exact(self):
         self.assertEqual((await self.request("/api/state/extra"))[0], 404)
         self.assertEqual((await self.request("/api/onoff/extra", "{}"))[0], 404)
+
+    async def test_history_and_csv_use_the_existing_authentication(self):
+        for path in ("/api/history", "/api/history.csv"):
+            self.assertEqual((await self.request(path, token="wrong"))[0], 401)
+            status, body = await self.request(path)
+            self.assertEqual(status, 200)
+            if path.endswith(".csv"):
+                self.assertTrue(body.startswith(b"timestamp_utc,unix_seconds,mac,outlet"))
+            else:
+                self.assertEqual(json.loads(body)["summary"]["readings"], 0)
+        self.assertEqual((await self.request("/api/history?outlet=0"))[0], 400)
+        self.assertEqual((await self.request("/api/history?start=nan"))[0], 400)
+
+    async def test_history_is_unavailable_when_no_recorder_is_configured(self):
+        self.hub.history = None
+        self.assertEqual((await self.request("/api/history"))[0], 503)
+
+    async def test_history_api_and_csv_return_the_same_persisted_period(self):
+        device = powerk.Device("AABBCCDDEEFF", "test", "1", "127.0.0.1")
+        device.online = True
+        for at, energy in ((1000, 5), (1030, 5.001)):
+            device.last_seen = at
+            for outlet in device.outlets.values():
+                outlet["energy_kwh"] = energy
+            self.history.record(device.snapshot())
+        status, body = await self.request("/api/history?start=900&end=2000&outlet=4")
+        self.assertEqual(status, 200)
+        report = json.loads(body)
+        self.assertEqual(report["summary"]["readings"], 2)
+        self.assertEqual(report["summary"]["energy_kwh"], .001)
+        status, body = await self.request("/api/history.csv?start=900&end=2000&outlet=4")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body.decode().splitlines()), 3)
 
     async def test_strict_input_validation(self):
         valid = {"mac": MAC, "outlet": 1, "on": False}
@@ -243,6 +283,9 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, 502)
             self.assertFalse(json.loads(response)["confirmed"])
             self.assertIn(2, state_on)
+            await asyncio.get_running_loop().run_in_executor(None, self.history.pending.join)
+            self.assertEqual(self.history.status()["readings_saved"], 4)
+            self.assertIsNone(self.history.status()["error"])
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

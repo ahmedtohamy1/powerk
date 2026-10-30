@@ -24,6 +24,7 @@ phone, from a PC, from anywhere if you run the server on a VPS.
 - [Mode B — Server (VPS, control from anywhere)](#mode-b--server-vps-control-from-anywhere)
 - [Android app (`android/`)](#android-app-android)
 - [Web UI and HTTP API](#web-ui-and-http-api)
+- [Consumption history](#consumption-history)
 - [Protocol reference](#protocol-reference)
 - [Troubleshooting](#troubleshooting)
 - [What this does not do (on purpose)](#what-this-does-not-do-on-purpose)
@@ -343,6 +344,8 @@ the original interface; a separately labeled sample preview is not a device serv
 | GET | `/` | the web UI |
 | GET | `/api/state` | `{"local_ip":"…","port":10086,"devices":[{"mac","name","model","fw","online","on","power_w","energy_kwh","voltage","current_a","rssi","outlets":[…]}]}` |
 | POST | `/api/onoff` | `{"mac":"…","outlet":0-4,"on":true}` — outlet `0` = all |
+| GET | `/api/history` | Filtered consumption summary, UTC buckets, and historical device list |
+| GET | `/api/history.csv` | Streaming raw readings for the selected period/device/outlet |
 | GET | `/powerk.py` | the script itself (public) |
 | GET | `/powerk.apk` | the built Android app, if present (public) |
 
@@ -364,6 +367,78 @@ work, but cannot undo relay commands already sent. Refresh before retrying.
 State includes `last_seen`, the Unix timestamp of the latest complete status
 report. A failed device poll marks the strip offline and closes its session.
 The web UI disables offline/pending controls and reports connection failures.
+
+## Consumption history
+
+Recording runs on the server, even when the browser and Android app are closed.
+Every **30 seconds per connected strip**, a complete snapshot saves all four
+outlets to **`data/history.sqlite3`** beside `powerk.py`. SQLite is part of Python's
+standard library; no database server or package installation is needed. Data
+survives restarts and is **never automatically deleted**. Runtime database files
+are excluded from Git.
+
+The web dashboard's **Consumption history** section filters the last 24 hours,
+7 days, or 30 days by strip and outlet. It shows measured counter increases,
+saved reading counts, reset/gap flags, and an hourly/daily table using **UTC**.
+Historical devices remain in the filter even when disconnected. **Export CSV**
+downloads raw readings for those same filters, with the existing authentication.
+
+Configure storage and sampling if needed:
+
+```bash
+python powerk.py serve --web-port 8081 --history-db /path/to/history.sqlite3 --history-interval 30
+```
+
+`--history-interval` accepts 5–3600 seconds. Use a disk location the server user
+can write. Keep the server running to collect data. The recorder queues writes
+in a background thread; history queries and CSV exports do not block the device
+event loop. The UI reports the last saved timestamp and storage failures.
+
+How consumption is calculated:
+
+* The first saved reading for each outlet is a **baseline**, not new consumption.
+  Powerk cannot recover detailed history from before recording started.
+* Energy counters are stored as integer **Wh**. Consumption is the nonnegative
+  difference between consecutive saved counters, not an estimate from watts.
+* A lower counter is marked **`reset`** and contributes no delta. Its observed
+  value is retained as the new baseline; detected resets force an early save.
+  Usage around unobserved resets can be
+  undercounted; the application does not invent it.
+* An interval longer than `max(120 seconds, 3 × sampling interval)` is marked
+  **`gap`**. A nonnegative counter increase across that interval is preserved,
+  but its timing inside the gap is unknown. Flags count per-outlet intervals.
+* A period total includes a delta only when both saved observations are within
+  `[start, end)`. A UTC bucket includes it only when both observations also lie
+  in that bucket. Deltas crossing bucket boundaries are shown separately as
+  `unallocated_energy_kwh`, rather than assigned to the wrong hour/day.
+* Offline/stale snapshots are not saved as new readings. Disk/queue failures
+  are surfaced; the next saved counter may bridge a gap. No automatic retention
+  policy is applied, so disk usage grows with time and connected strip count.
+
+API filters for both endpoints: `start` and `end` are Unix seconds; optional
+`mac` is a 12-hex device address; optional `outlet` is `1..4`; `bucket` is `hour`
+or `day` (default `day`). The default period is the last seven days, with a
+maximum range of 366 days per request. Ranges can be exported in consecutive
+windows for longer-term analysis. Invalid filters return 400; unavailable storage
+returns 503. There is no generated API schema in this repository.
+
+`/api/state` also includes `history` recording status: `enabled`,
+`interval_seconds`, `last_recorded_at`, `readings_saved`, `failed_snapshots`, and
+`error`. Failure counts describe the current server process.
+
+`/api/history` returns `start`, `end`, `bucket`, `timezone`, `devices`, `buckets`,
+and `summary`. The summary includes `energy_kwh`, `readings`, `resets`, `gaps`,
+`first_sample`, `last_sample`, and `unallocated_energy_kwh`.
+
+CSV columns contain UTC timestamps and Unix seconds, MAC, outlet number, relay
+state, watts, cumulative counter in Wh, temperature in °C, voltage, RSSI in dBm,
+previous timestamp, interval length in seconds, delta Wh, and quality
+(`baseline`, `ok`, `gap`, `reset`). Missing values/deltas are blank, not zero.
+Preserve MACs as strings when importing into analytics tools.
+
+Back up the database with SQLite's backup API (or its `.backup` command), not by
+copying only the main file while the server is writing in WAL mode. CSV is useful
+for analysis; a SQLite backup preserves the complete database and metadata.
 
 ## Development and validation
 
@@ -418,7 +493,7 @@ some frames with NUL bytes and the port is fixed at 10086.
 
 ## What this does not do (on purpose)
 
-MQTT/Home Assistant entities, Matter, energy history, firmware OTA, multi-user
+MQTT/Home Assistant entities, Matter, firmware OTA, multi-user
 accounts. Add them when you actually want them.
 
 ---

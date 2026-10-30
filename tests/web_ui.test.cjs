@@ -15,6 +15,7 @@ class Element {
   setAttribute(key, value) { this.attributes[key] = value; }
   getAttribute(key) { return this.attributes[key]; }
   scrollIntoView() {}
+  click() { this.clicked = true; return this.onclick?.(); }
   remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
   set innerHTML(value) { throw Error('Device fields must never be parsed as HTML'); }
 }
@@ -32,6 +33,7 @@ function harness(initialState = state) {
   const context = vm.createContext({
     document: {
       documentElement: new Element(),
+      body: new Element(),
       getElementById: id => elements[id] ||= new Element(),
       createElement: () => new Element(),
     },
@@ -221,4 +223,89 @@ test('the main strip view retains all original readings and power precision', as
   assert.equal(elements['total-power'].textContent, '0.01');
   assert.ok(descendants(elements.app).some(el => el.className === 'outlet-detail' && el.textContent.includes('31 °C')));
   assert.ok(descendants(elements.app).some(el => el.className === 'outlet-power' && el.children.some(child => child.textContent === '0.01')));
+});
+
+const historyReport = {
+  bucket:'day', devices:[{mac:'AABBCCDDEEFF', name:'test'}],
+  summary:{energy_kwh:.125, readings:8, resets:1, gaps:1, unallocated_energy_kwh:.005},
+  buckets:[{timestamp:1761868800, energy_kwh:.12, readings:8, resets:1, gaps:1}],
+};
+
+test('history filters request the selected device, outlet and period', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  elements['history-range'].value = '1';
+  elements['history-device'].value = 'AABBCCDDEEFF';
+  elements['history-outlet'].value = '3';
+  let requested;
+  context.fetch = async (path, options) => {
+    requested = new URLSearchParams(path.split('?')[1]);
+    assert.equal(options.headers['X-Token'], 'secret');
+    return {ok:true, text:async () => JSON.stringify(historyReport)};
+  };
+  await vm.runInContext('loadHistory()', context);
+  assert.equal(requested.get('mac'), 'AABBCCDDEEFF');
+  assert.equal(requested.get('outlet'), '3');
+  assert.equal(requested.get('bucket'), 'hour');
+  assert.equal(Number(requested.get('end')) - Number(requested.get('start')), 86400);
+  assert.equal(elements['history-energy'].textContent, '0.125');
+  assert.equal(elements['history-flags'].textContent, '2');
+  assert.equal(elements['history-rows'].children.length, 1);
+  assert.match(elements['history-boundaries'].textContent, /0.005 kWh/);
+  assert.equal(elements['history-export'].disabled, false);
+});
+
+test('old history requests cannot replace results for a newer filter', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  let resolveOld;
+  context.fetch = () => new Promise(resolve => { resolveOld = resolve; });
+  const old = vm.runInContext('loadHistory()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify(historyReport)});
+  await vm.runInContext('loadHistory()', context);
+  resolveOld({ok:true, text:async () => JSON.stringify({...historyReport, summary:{...historyReport.summary, energy_kwh:99}})});
+  await old;
+  assert.equal(elements['history-energy'].textContent, '0.125');
+});
+
+test('history failures are visible and never disable live outlet controls', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:false, status:503, text:async () => '{"error":"history storage unavailable"}'});
+  await vm.runInContext('loadHistory()', context);
+  assert.match(elements['history-message'].textContent, /history storage unavailable/);
+  assert.equal(elements['history-export'].disabled, true);
+  assert.equal(elements['history-energy'].textContent, '—');
+  assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => !el.disabled));
+});
+
+test('CSV download uses the displayed report filters and authentication header', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify(historyReport)});
+  await vm.runInContext('loadHistory()', context);
+  let exportPath, savedBlob;
+  context.URL = {createObjectURL:blob => { savedBlob = blob; return 'blob:test'; }, revokeObjectURL() {}};
+  context.fetch = async (path, options) => {
+    exportPath = path;
+    assert.equal(options.headers['X-Token'], 'secret');
+    return {ok:true, blob:async () => new Blob(['timestamp_utc,power_w\r\n2026-10-30T12:00:00+00:00,5.3\r\n'])};
+  };
+  await vm.runInContext('exportHistory()', context);
+  assert.match(exportPath, /^api\/history\.csv\?start=/);
+  assert.ok(!exportPath.includes('secret'));
+  assert.match(await savedBlob.text(), /power_w/);
+  assert.match(elements['history-message'].textContent, /CSV downloaded/);
+  assert.equal(context.document.body.children.length, 0);
+});
+
+test('recording health distinguishes storage errors from no data', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify(historyReport)});
+  await vm.runInContext('loadHistory()', context);
+  vm.runInContext("updateRecording({enabled:true, interval_seconds:30, last_recorded_at:1000, failed_snapshots:2, error:'History write failed'})", context);
+  assert.equal(elements['history-recording'].textContent, 'Storage error');
+  assert.match(elements['history-saved'].textContent, /2 failed snapshots/);
+  assert.equal(elements['history-message'].dataset.kind, 'error');
 });
