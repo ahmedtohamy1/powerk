@@ -370,6 +370,36 @@ The web UI disables offline/pending controls and reports connection failures.
 
 ## Consumption history
 
+### USB charging ports and measurement scope
+
+The MTTL-W01 has four AC outlets and two USB charging ports, as listed by
+[LG U+](https://www.lguplus.com/smart-home/device/IOT1000005). The
+[Zorar controller's compatibility notes](https://zorarapp.com/compatibility)
+describe the USB ports as always-powered and not switchable. The
+[stock protocol guide](https://github.com/AmrEmad0/MTTL-W01_APP/blob/main/MTTL_CONTROLLER_PROTOCOL_GUIDE.md)
+documents telemetry/control for AC channels 1–4, without a verified USB meter or
+USB switching command. Do not infer USB functionality from an extra channel.
+
+For the verified `lgutap` / `0.1.54-1.0.66` family, the dashboard identifies
+**USB 1 + USB 2** and explains this limitation. USB live state, watts, and kWh remain
+unknown (`null`), not zero. Other firmware does not inherit these capability
+claims automatically. All on/off buttons address the four AC outlets only.
+
+**All existing and new saved readings, totals, history, and CSV exports cover
+AC outlets 1–4 only. They do not provide whole-strip or USB-port consumption.**
+Device snapshots and history reports expose
+`measurement_scope: "ac_outlets_1_to_4"`. Device snapshots include a `usb`
+capability object for the verified firmware (`port_count`, `power_design`,
+`control`, `metering`, and nullable `on`, `power_w`, `energy_kwh`); otherwise it is
+`null`. No new relay channels or USB history values are invented.
+
+For controllable charging with consumption history, a USB wall charger connected
+to one of the four smart AC outlets can be managed through that outlet. This
+measures the charger's AC input (including its losses and any connected devices),
+not separate USB outputs.
+
+### Saving and analyzing AC outlet readings
+
 Recording runs on the server, even when the browser and Android app are closed.
 Every **30 seconds per connected strip**, a complete snapshot saves all four
 outlets to **`data/history.sqlite3`** beside `powerk.py`. SQLite is part of Python's
@@ -377,7 +407,7 @@ standard library; no database server or package installation is needed. Data
 survives restarts and is **never automatically deleted**. Runtime database files
 are excluded from Git.
 
-The web dashboard's **Consumption history** section filters the last 24 hours,
+The web dashboard's **AC consumption history** section filters the last 24 hours,
 7 days, or 30 days by strip and outlet. It shows measured counter increases,
 saved reading counts, reset/gap flags, and an hourly/daily table using **UTC**.
 Historical devices remain in the filter even when disconnected. **Export CSV**

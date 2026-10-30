@@ -67,7 +67,7 @@ QUERY_RE = re.compile(r"^up:query:(-?\d+)$")
 
 
 def parse_getinfo(line: str) -> list[dict]:
-    """Parse 'up:getinfo:...' into per-outlet records (channel 5 is the aggregate)."""
+    """Decode confirmed AC channels 1..4; do not interpret extra records as USB data."""
     text = line.strip("\r\n\x00 ")
     if text.startswith("up:getinfo:"):
         text = text[len("up:getinfo:"):]
@@ -284,7 +284,8 @@ class History:
         for key in ("energy_kwh", "resets", "gaps"):
             summary[key] = summary[key] or 0
         summary["unallocated_energy_kwh"] = round(summary["energy_kwh"] - sum(b["energy_kwh"] for b in buckets), 6)
-        return {"start": params["start"], "end": params["end"], "bucket": params["bucket"],
+        return {"measurement_scope": "ac_outlets_1_to_4",
+                "start": params["start"], "end": params["end"], "bucket": params["bucket"],
                 "timezone": "UTC", "summary": summary, "buckets": buckets, "devices": devices}
 
     @staticmethod
@@ -339,6 +340,12 @@ class Device:
 
     def snapshot(self) -> dict:
         outlets = [dict(outlet) for outlet in self.outlets.values()]
+        # Capability metadata for the verified stock family/firmware, not live USB telemetry.
+        usb = None
+        if self.model.lower() == "lgutap" and self.fw == "0.1.54-1.0.66":
+            usb = {"port_count": 2, "power_design": "always_powered",
+                   "control": "not_exposed", "metering": "not_reported",
+                   "on": None, "power_w": None, "energy_kwh": None}
         return {
             "mac": self.mac,
             "name": self.name,
@@ -354,6 +361,8 @@ class Device:
             "current_a": self.current_a,
             "rssi": self.rssi,
             "outlets": outlets,
+            "measurement_scope": "ac_outlets_1_to_4",
+            "usb": usb,
         }
 
 
@@ -707,6 +716,9 @@ h2{font-size:var(--text-lg);letter-spacing:var(--tracking-tight);font-weight:var
 .device-details{border-top:1px solid var(--line);margin-top:var(--space-5);padding-top:var(--space-3);font-size:var(--text-xs);color:var(--muted)}
 summary{cursor:pointer;min-height:var(--control-size);align-content:center;font-weight:var(--weight-medium)}
 .device-detail-text{overflow-wrap:anywhere;margin:var(--space-2) 0 0;line-height:var(--leading-normal)}
+.usb-info{margin-top:var(--space-4);padding:var(--space-4);background:var(--subtle);border:1px solid var(--line);border-radius:var(--radius-control)}
+.usb-info h4{margin:0;font-size:var(--text-sm);font-weight:var(--weight-semibold)}
+.usb-info p{margin:var(--space-2) 0 0;font-size:var(--text-xs);color:var(--muted)}
 .empty{border:1px dashed var(--line);border-radius:var(--radius-panel);text-align:center;padding:var(--space-12) var(--space-6);background:var(--surface)}
 .empty-symbol{font-size:var(--text-3xl);color:var(--muted);margin-bottom:var(--space-3)}
 .empty h3{font-size:var(--text-lg);letter-spacing:var(--tracking-tight);margin:0 0 var(--space-2)}
@@ -744,20 +756,20 @@ select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid 
   <div class="intro"><div><p class="eyebrow">Device dashboard</p><h1>Power overview</h1><p class="description">Monitor usage and control each outlet.</p></div><span class="updated" id="updated">Waiting for a live update</span></div>
   <div id="error" role="status" aria-live="polite"></div>
   <section class="overview" aria-label="Power summary">
-    <div class="metric primary"><span class="metric-icon" aria-hidden="true">ϟ</span><p class="metric-label">Live power</p><div class="metric-value"><span id="total-power">—</span><small>W</small></div><p class="metric-note" id="power-note">Waiting for connected strips</p></div>
-    <div class="metric"><span class="metric-icon" aria-hidden="true">⏻</span><p class="metric-label">Active outlets</p><div class="metric-value"><span id="active-outlets">—</span><small id="outlet-total"></small></div><p class="metric-note">Across connected strips</p></div>
-    <div class="metric"><span class="metric-icon" aria-hidden="true">↗</span><p class="metric-label">Reported energy</p><div class="metric-value"><span id="total-energy">—</span><small>kWh</small></div><p class="metric-note" id="energy-note">Device-reported cumulative total</p></div>
+    <div class="metric primary"><span class="metric-icon" aria-hidden="true">ϟ</span><p class="metric-label">AC outlet power</p><div class="metric-value"><span id="total-power">—</span><small>W</small></div><p class="metric-note" id="power-note">Waiting for connected strips</p></div>
+    <div class="metric"><span class="metric-icon" aria-hidden="true">⏻</span><p class="metric-label">Active AC outlets</p><div class="metric-value"><span id="active-outlets">—</span><small id="outlet-total"></small></div><p class="metric-note">Across connected strips</p></div>
+    <div class="metric"><span class="metric-icon" aria-hidden="true">↗</span><p class="metric-label">AC energy counter</p><div class="metric-value"><span id="total-energy">—</span><small>kWh</small></div><p class="metric-note" id="energy-note">Device-reported cumulative total</p></div>
   </section>
   <div class="section-heading"><h2>Your power strips</h2><span class="count" id="device-count">Connecting…</span></div>
   <div id="app"></div>
   <div class="empty" id="empty"><div class="empty-symbol" aria-hidden="true">⌁</div><h3 id="empty-title">Connecting to your home</h3><p id="empty-body">Your strips and their latest readings will appear here.</p><button id="setup-button" type="button">View connection setup</button></div>
   <section class="history" aria-labelledby="history-title">
-    <div class="section-heading"><h2 id="history-title">Consumption history</h2><span class="pill" id="history-recording">Checking recorder…</span></div>
+    <div class="section-heading"><h2 id="history-title">AC consumption history</h2><span class="pill" id="history-recording">Checking recorder…</span></div>
     <p class="history-note" id="history-saved">Recording begins when the server receives a complete strip reading.</p>
     <div class="history-filters">
       <label>Period<select id="history-range"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option></select></label>
       <label class="history-device">Power strip<select id="history-device"><option value="">All strips</option></select></label>
-      <label>Outlet<select id="history-outlet"><option value="">All outlets</option><option value="1">Outlet 1</option><option value="2">Outlet 2</option><option value="3">Outlet 3</option><option value="4">Outlet 4</option></select></label>
+      <label>AC outlet<select id="history-outlet"><option value="">All AC outlets</option><option value="1">Outlet 1</option><option value="2">Outlet 2</option><option value="3">Outlet 3</option><option value="4">Outlet 4</option></select></label>
       <button id="history-refresh" type="button">Refresh history</button><button id="history-export" type="button" disabled>Export CSV</button>
     </div>
     <p class="history-message" id="history-message" role="status" aria-live="polite">Waiting for saved readings.</p>
@@ -770,7 +782,7 @@ select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid 
       <table><thead><tr><th scope="col">Period (UTC)</th><th scope="col">Increase (kWh)</th><th scope="col">Readings</th><th scope="col">Flags</th></tr></thead><tbody id="history-rows"></tbody></table>
     </div>
     <p class="history-note" id="history-boundaries" hidden></p>
-    <p class="history-note">Only complete observed intervals are counted. First readings establish a baseline; counter resets and long gaps are flagged. CSV contains raw measurements for later analysis.</p>
+    <p class="history-note">AC outlets 1–4 only; USB charging is not separately reported. Only complete observed intervals are counted. First readings establish a baseline; counter resets and long gaps are flagged. CSV contains raw measurements for later analysis.</p>
   </section>
   <details class="setup" id="setup"><summary>Connection &amp; setup</summary><p id="hint">Waiting for server details.</p><p>To connect a new strip, provision it with this server's address while connected to the strip's setup Wi-Fi.</p><code id="provision">python powerk.py provision --ip SERVER_IP --ssid YOUR_WIFI --password YOUR_PASSWORD</code><p>Keep the strip connection on a trusted network. Refresh the dashboard after provisioning.</p></details>
   <footer><span>Local control. A direct connection.</span><span>Readings update automatically · No cloud account</span></footer>
@@ -966,10 +978,14 @@ function createStrip() {
   const allOff = node('button', 'All off', actions, 'all-off');
   const summary = node('div', '', card, 'strip-summary');
   const grid = node('div', '', card, 'grid');
+  const usbInfo = node('section', '', card, 'usb-info');
+  usbInfo.hidden = true;
+  node('h4', 'USB 1 + USB 2 · Always-powered design', usbInfo);
+  node('p', 'No USB software switch or separate power/energy readings are exposed by this stock firmware. All on / All off controls above apply to AC outlets only; USB charging is not included in the consumption history.', usbInfo);
   const details = node('details', '', card, 'device-details');
   node('summary', 'Device details', details);
   const metadata = node('p', '', details, 'device-detail-text');
-  return {card, title, caption, badge, allOn, allOff, summary, grid, metadata, outlets:new Map()};
+  return {card, title, caption, badge, allOn, allOff, summary, grid, usbInfo, metadata, outlets:new Map()};
 }
 function createOutlet(grid) {
   const card = node('div', '', grid, 'outlet');
@@ -1016,7 +1032,8 @@ function render(s) {
     const v = views.get(d.mac);
     const live = healthy && d.online;
     text(v.title, d.name);
-    text(v.caption, `${d.model} · Firmware ${d.fw} · 4-outlet smart strip`);
+    text(v.caption, `${d.model} · Firmware ${d.fw} · 4 AC outlets${d.usb?.port_count === 2 ? ' + 2 USB charging ports' : ''}`);
+    v.usbInfo.hidden = d.usb?.port_count !== 2;
     text(v.badge, live ? 'Online' : 'Offline / stale');
     v.badge.className = live ? 'pill' : 'pill offline';
     v.allOn.disabled = v.allOff.disabled = busy || !live;

@@ -23,6 +23,11 @@ icon downloads, or frontend build dependencies.
   identity details expandable. Use direct functional copy, not marketing text.
 - Preserve measurement precision from the API: power uses up to two decimals,
   energy three, and current two. Do not round small nonzero power readings to zero.
+- Separate physical ports from confirmed control/metering channels. Show the two
+  USB charging ports for the verified stock model/firmware as capability
+  information, with no fake switch or zero-valued readings. Always-powered design
+  is not measured live state. Label totals and history as AC-only; never count
+  USB as extra metered outlets or infer USB data from an unidentified channel.
 
 ## Color tokens
 

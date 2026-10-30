@@ -16,6 +16,25 @@ MAC = "AABBCCDDEEFF"
 
 
 class StartupTests(unittest.TestCase):
+    def test_usb_capabilities_do_not_fabricate_readings_or_extra_outlets(self):
+        device = powerk.Device("AABBCCDDEEFF", "lgutap", "0.1.54-1.0.66", "127.0.0.1")
+        snapshot = device.snapshot()
+        self.assertEqual(snapshot["measurement_scope"], "ac_outlets_1_to_4")
+        self.assertEqual(snapshot["usb"]["port_count"], 2)
+        self.assertEqual(snapshot["usb"]["control"], "not_exposed")
+        self.assertEqual(snapshot["usb"]["metering"], "not_reported")
+        for key in ("on", "power_w", "energy_kwh"):
+            self.assertIsNone(snapshot["usb"][key])
+        self.assertEqual([o["n"] for o in snapshot["outlets"]], [1, 2, 3, 4])
+        device.fw = "unverified-firmware"
+        self.assertIsNone(device.snapshot()["usb"])
+
+    def test_extra_protocol_record_is_not_assumed_to_be_a_usb_meter(self):
+        payload = powerk._fake_tags(set())
+        extra = payload.split(":")[1]
+        records = powerk.parse_getinfo(f"up:getinfo:{payload}:5:{extra}")
+        self.assertEqual([record["n"] for record in records], [1, 2, 3, 4])
+
     def test_default_command_has_all_server_defaults(self):
         serve = AsyncMock(return_value=0)
         with patch.object(sys, "argv", ["powerk.py"]), patch.object(powerk, "cmd_serve", serve):
@@ -234,6 +253,13 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_offline_command_returns_503(self):
         self.assertEqual((await self.request(body=json.dumps({"mac": MAC, "outlet": 1, "on": True})))[0], 503)
+
+    async def test_unverified_usb_channels_cannot_send_relay_commands(self):
+        self.hub.command = AsyncMock()
+        for channel in (5, 6):
+            status, _ = await self.request(body=json.dumps({"mac": MAC, "outlet": channel, "on": True}))
+            self.assertEqual(status, 400)
+        self.hub.command.assert_not_awaited()
 
     async def test_unconfirmed_command_and_deadline_are_errors(self):
         body = json.dumps({"mac": MAC, "outlet": 1, "on": True})

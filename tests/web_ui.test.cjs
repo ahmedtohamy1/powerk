@@ -309,3 +309,28 @@ test('recording health distinguishes storage errors from no data', async () => {
   assert.match(elements['history-saved'].textContent, /2 failed snapshots/);
   assert.equal(elements['history-message'].dataset.kind, 'error');
 });
+
+test('USB ports are identified without fake switches, readings or analytics', async () => {
+  const strip = {...state.devices[0], power_w:5.3, energy_kwh:.01,
+    usb:{port_count:2, power_design:'always_powered', control:'not_exposed', metering:'not_reported', on:null, power_w:null, energy_kwh:null},
+  };
+  const { context, elements } = harness({...state, devices:[strip]});
+  await vm.runInContext('refresh()', context);
+  const usb = descendants(elements.app).find(el => el.className === 'usb-info');
+  assert.equal(usb.hidden, false);
+  assert.match(usb.children[0].textContent, /USB 1 \+ USB 2/);
+  assert.match(usb.children[1].textContent, /No USB software switch/);
+  assert.equal(descendants(usb).filter(el => el.onclick || el.getAttribute('role') === 'switch').length, 0);
+  assert.equal(elements['total-power'].textContent, '5.3');
+  assert.equal(elements['total-energy'].textContent, '0.01');
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({...state, devices:[{...strip, online:false}]})});
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements['total-power'].textContent, '—');
+  assert.match(usb.children[0].textContent, /design/);
+});
+
+test('unknown firmware does not inherit USB hardware claims', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  assert.equal(descendants(elements.app).find(el => el.className === 'usb-info').hidden, true);
+});

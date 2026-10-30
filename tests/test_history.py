@@ -118,6 +118,16 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(all(row["mac"] == MAC and row["outlet"] == "3" for row in self.rows(params)))
         self.assertEqual(len(report["devices"]), 2)
 
+    def test_usb_capability_metadata_does_not_enter_ac_history_totals(self):
+        for at, energy in ((1000, 5), (1030, 5.001)):
+            reading = sample(at, energy)
+            reading["usb"] = {"port_count":2, "power_w":10, "energy_kwh":100}
+            self.history.record(reading)
+        report = self.history.report(self.params())
+        self.assertEqual(report["measurement_scope"], "ac_outlets_1_to_4")
+        self.assertEqual(report["summary"]["energy_kwh"], .004)
+        self.assertEqual(report["summary"]["readings"], 8)
+
     def test_offline_and_incomplete_snapshots_are_not_saved(self):
         offline = sample(1000)
         offline["online"] = False
