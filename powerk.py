@@ -516,7 +516,7 @@ function node(tag, value, parent, className = '') {
   parent.append(el);
   return el;
 }
-function format(value, digits = 1) {
+function format(value, digits = 2) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString(undefined, {maximumFractionDigits: digits}) : '—';
 }
 function applyTheme(dark) {
@@ -636,7 +636,7 @@ function render(s) {
     const v = views.get(d.mac);
     const live = healthy && d.online;
     text(v.title, d.name);
-    text(v.caption, `4-outlet smart strip · ${d.mac.slice(-6)}`);
+    text(v.caption, `${d.model} · Firmware ${d.fw} · 4-outlet smart strip`);
     text(v.badge, live ? 'Online' : 'Offline / stale');
     v.badge.className = live ? 'pill' : 'pill offline';
     v.allOn.disabled = v.allOff.disabled = busy || !live;
@@ -645,7 +645,7 @@ function render(s) {
     v.allOn.setAttribute('aria-label', `Turn all outlets on for ${d.name}`);
     v.allOff.setAttribute('aria-label', `Turn all outlets off for ${d.name}`);
     const seen = d.last_seen ? new Date(d.last_seen * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : 'never';
-    text(v.summary, `${format(d.power_w)} W ${live ? 'live' : 'last reported'}  ·  ${format(d.energy_kwh, 3)} kWh  ·  ${format(d.voltage)} V  ·  Updated ${seen}`);
+    text(v.summary, `${format(d.power_w)} W ${live ? 'live' : 'last reported'}  ·  ${format(d.energy_kwh, 3)} kWh  ·  ${format(d.voltage)} V  ·  ${format(d.current_a, 2)} A  ·  Wi-Fi ${format(d.rssi, 0)} dBm  ·  Updated ${seen}`);
     text(v.metadata, `Model: ${d.model} · Firmware: ${d.fw} · MAC: ${d.mac} · Current: ${format(d.current_a, 2)} A · Wi-Fi: ${format(d.rssi, 0)} dBm`);
     for (const [n, outlet] of v.outlets) {
       if (!d.outlets.some(o => o.n === n)) { outlet.card.remove(); v.outlets.delete(n); }

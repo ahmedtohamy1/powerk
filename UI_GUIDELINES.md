@@ -16,8 +16,13 @@ icon downloads, or frontend build dependencies.
   routine action: its button uses the standard neutral treatment.
 - Show success with explicit confirmation text on a neutral surface. Never
   communicate state only through color: retain labels and switch positions.
-- Prioritize readings and controls. Keep firmware, networking, and provisioning
-  details in expandable sections. Use direct functional copy, not marketing text.
+- Preserve functional parity when redesigning. Keep every outlet control, strip
+  bulk action, and existing measurement available through the real server API.
+  Show model, firmware, watts, cumulative energy, voltage, current, and Wi-Fi
+  signal in the strip view. Keep provisioning instructions and advanced device
+  identity details expandable. Use direct functional copy, not marketing text.
+- Preserve measurement precision from the API: power uses up to two decimals,
+  energy three, and current two. Do not round small nonzero power readings to zero.
 
 ## Color tokens
 

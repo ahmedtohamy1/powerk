@@ -330,10 +330,13 @@ cumulative energy readings. Each strip has individual outlet switches and
 separate **All on** / **All off** controls. Offline readings are marked as stale
 and excluded from live totals. **Dark theme** is saved in this browser.
 
-Expand **Device details** for model, firmware, and signal information, or
+Model, firmware, watts, energy, voltage, current, and Wi-Fi signal are visible
+in each strip's main view. Expand **Device details** for the full MAC address, or
 **Connection & setup** for the server address and provisioning command. Live
 updates preserve keyboard focus and expanded panels. After updating `powerk.py`,
 restart the server process to load the new dashboard, then reload the browser.
+The normal server page controls real connected strips through the same API as
+the original interface; a separately labeled sample preview is not a device server.
 
 | Method | Path | Notes |
 |---|---|---|
