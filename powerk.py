@@ -311,82 +311,327 @@ class Hub:
 
 
 PAGE = """<!doctype html>
-<meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>powerk</title>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>powerk · Power overview</title>
 <style>
-:root{--bg:#0f1115;--card:#191d24;--on:#2ecc71;--off:#39424f;--fg:#e8ecf1;--dim:#8b96a5}
+:root{color-scheme:light;--bg:#f5f6f2;--surface:#fff;--subtle:#f7f8f5;--ink:#24332b;--muted:#657269;--line:#dfe5dc;--green:#37664b;--mint:#e5efe1;--mint-ink:#294a32;--danger:#963d33;--danger-bg:#fff0ec;--shadow:0 4px 20px #253c2810}
+:root[data-theme=dark]{color-scheme:dark;--bg:#151d19;--surface:#1d2821;--subtle:#243027;--ink:#e4ece3;--muted:#a4b2a6;--line:#354439;--green:#a1cc9d;--mint:#304833;--mint-ink:#d2e9c8;--danger:#ffb4a6;--danger-bg:#412b27;--shadow:none}
 *{box-sizing:border-box}
-body{margin:auto;padding:16px;max-width:720px;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif}
-h1{font-size:20px;margin:0}
-.hint{color:var(--dim);font-size:13px;margin:6px 0 16px}
-.card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:16px}
-.card.off{opacity:.45}
-.head{display:flex;justify-content:space-between;align-items:center;gap:10px}
-.head button{width:auto;padding:10px 16px;flex-shrink:0}
-#error{color:#ffb4ab;margin:8px 0 16px}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,summary,a{-webkit-tap-highlight-color:transparent}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);padding:10px 16px;min-height:44px;transition:background .15s,border-color .15s}
+button:hover:not(:disabled){background:var(--mint);border-color:var(--green)}
+button:disabled{cursor:default;opacity:.5}
+button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--green);outline-offset:4px}
+[hidden]{display:none!important}
+.shell{max-width:1160px;margin:auto;padding:0 32px}
+.topbar{height:94px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);gap:16px}
+.brand{display:flex;align-items:center;gap:11px;font-size:24px;font-weight:750;letter-spacing:-1px}
+.brand-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:var(--ink);color:var(--surface);font-size:25px;font-weight:400;letter-spacing:0}
+.top-actions,.status,.actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.top-actions button{font-size:13px;padding:8px 12px}
+.status{font-size:12px;font-weight:600;color:var(--muted);gap:7px}
+.status::before{content:"";width:7px;height:7px;background:var(--muted);border-radius:50%}
+.status.live::before{background:var(--green);box-shadow:0 0 0 4px var(--mint)}
+main{padding:42px 0 48px}
+.eyebrow{font-size:11px;font-weight:700;letter-spacing:1.7px;text-transform:uppercase;color:var(--muted);margin:0 0 9px}
+h1{font-size:clamp(28px,4vw,38px);letter-spacing:-1.4px;line-height:1.15;margin:0;font-weight:650}
+.intro{display:flex;justify-content:space-between;align-items:end;gap:18px;margin-bottom:28px}
+.description{color:var(--muted);margin:10px 0 0;font-size:14px}
+.updated{font-size:12px;color:var(--muted);white-space:nowrap}
+.overview{display:grid;grid-template-columns:1.45fr 1fr 1fr;gap:16px;margin-bottom:36px}
+.metric{padding:24px;border:1px solid var(--line);background:var(--surface);border-radius:18px;position:relative;overflow:hidden}
+.metric.primary{background:var(--mint);border-color:var(--mint);color:var(--mint-ink)}
+.metric-label{font-size:13px;font-weight:600;margin:0;padding-right:28px}
+.metric-value{display:flex;align-items:baseline;flex-wrap:wrap;font-size:44px;letter-spacing:-2px;font-weight:600;line-height:1.15;margin:20px 0 8px;font-variant-numeric:tabular-nums}
+.metric-value>span{min-width:0;overflow-wrap:anywhere;max-width:100%}
+.metric-value small{font-size:18px;letter-spacing:0;font-weight:450;margin-left:6px}
+.metric-note{font-size:12px;color:var(--muted);margin:0}
+.primary .metric-note{color:var(--mint-ink)}
+.metric-icon{position:absolute;top:21px;right:22px;font-size:24px;opacity:.7}
+.section-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px}
+h2{font-size:19px;letter-spacing:-.5px;font-weight:650;margin:0}
+.count{color:var(--muted);font-size:12px;background:var(--surface);border:1px solid var(--line);padding:4px 10px;border-radius:20px}
+#error{border:1px solid var(--danger);background:var(--danger-bg);color:var(--danger);border-radius:12px;padding:13px 16px;margin-bottom:22px;font-size:13px;overflow-wrap:anywhere}
 #error:empty{display:none}
-.mac{font-weight:600}
-.dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:#c0392b}
-.dot.on{background:var(--on)}
-.stats{color:var(--dim);font-size:13px;margin:8px 0 12px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-button{border:0;border-radius:12px;padding:14px 10px;font:inherit;color:var(--fg);background:var(--off);text-align:left;width:100%;cursor:pointer}
-button.on{background:var(--on);color:#06130a}
-button:disabled{cursor:default;opacity:.6}
-button small{display:block;opacity:.85;font-size:12px}
+#error[data-kind=success]{background:var(--mint);border-color:var(--line);color:var(--green)}
+#error[data-kind=pending]{background:var(--subtle);border-color:var(--line);color:var(--muted)}
+.strip{border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:var(--shadow);padding:24px;margin-bottom:20px;min-width:0}
+.strip-header{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}
+.strip-heading{display:flex;gap:13px;align-items:center;min-width:0}
+.strip-icon{width:43px;height:43px;display:grid;place-items:center;background:var(--subtle);border:1px solid var(--line);border-radius:12px;font-size:24px;color:var(--green);flex-shrink:0}
+.strip h3{font-size:17px;letter-spacing:-.3px;margin:0;overflow-wrap:anywhere}
+.strip-caption{font-size:12px;color:var(--muted);margin-top:3px}
+.pill{font-size:11px;font-weight:600;padding:4px 9px;border-radius:20px;background:var(--mint);color:var(--mint-ink)}
+.pill.offline{background:var(--subtle);color:var(--muted)}
+.actions button{font-size:12px;min-height:40px;padding:8px 13px}
+.actions .all-off{color:var(--danger)}
+.strip-summary{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:22px 0 16px}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.outlet{border:1px solid var(--line);background:var(--subtle);border-radius:14px;padding:16px;min-width:0;position:relative}
+.outlet.is-on{background:var(--mint);border-color:var(--mint)}
+.outlet-top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:24px}
+.socket{width:38px;height:38px;border:1.5px solid var(--muted);border-radius:50%;position:relative;opacity:.65;flex-shrink:0}
+.socket::before,.socket::after{content:"";position:absolute;background:var(--muted);width:4px;height:7px;top:12px;border-radius:2px}
+.socket::before{left:10px}.socket::after{right:10px}
+.toggle{position:relative;min-height:44px;width:54px;padding:0;border:0;background:transparent;flex-shrink:0}
+.toggle-track{display:block;height:25px;width:44px;border-radius:20px;background:var(--line);position:absolute;left:5px;top:9px}
+.toggle-track::after{content:"";position:absolute;top:4px;left:4px;width:17px;height:17px;border-radius:50%;background:var(--surface);box-shadow:0 1px 3px #0002;transition:transform .18s}
+.toggle[aria-checked=true] .toggle-track{background:var(--green)}
+.toggle[aria-checked=true] .toggle-track::after{transform:translateX(19px)}
+.toggle:hover:not(:disabled){background:transparent;border:0}
+.outlet-label{font-size:13px;font-weight:650;margin:0}
+.outlet-state{font-size:11px;color:var(--muted);margin:3px 0 16px;min-height:17px}
+.outlet-power{font-size:26px;letter-spacing:-1px;font-weight:550;font-variant-numeric:tabular-nums}
+.outlet-power small{font-size:12px;letter-spacing:0;margin-left:4px;color:var(--muted)}
+.outlet-detail{font-size:11px;color:var(--muted);margin-top:4px}
+.device-details{border-top:1px solid var(--line);margin-top:20px;padding-top:15px;font-size:12px;color:var(--muted)}
+summary{cursor:pointer;min-height:28px;align-content:center;font-weight:550}
+.device-detail-text{overflow-wrap:anywhere;margin:10px 0 0;line-height:1.9}
+.empty{border:1px dashed var(--line);border-radius:20px;text-align:center;padding:48px 24px;background:var(--surface)}
+.empty-symbol{font-size:32px;color:var(--green);margin-bottom:12px}
+.empty h3{font-size:19px;letter-spacing:-.5px;margin:0 0 8px}
+.empty p{color:var(--muted);font-size:13px;max-width:370px;margin:0 auto 20px}
+.setup{margin-top:28px;border-top:1px solid var(--line);padding-top:20px;color:var(--muted);font-size:13px}
+.setup summary{font-size:13px}.setup p{max-width:650px}.setup code{display:block;background:var(--surface);border:1px solid var(--line);padding:14px;border-radius:10px;overflow-wrap:anywhere;white-space:pre-wrap;color:var(--ink);font-size:12px}
+footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:32px}
+@media(min-width:900px){.primary::after{content:"";position:absolute;width:120px;height:120px;border:1px solid currentColor;border-radius:50%;right:-30px;bottom:-30px;opacity:.12;box-shadow:0 0 0 20px var(--mint),0 0 0 21px currentColor}}
+@media(max-width:760px){.shell{padding:0 20px}.topbar{height:80px}.status{display:none}.overview{grid-template-columns:1fr 1fr;gap:12px}.primary{grid-column:1/-1}.metric{padding:20px}.metric-value{font-size:36px;margin-top:16px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.strip{padding:18px}.intro{align-items:start;flex-direction:column;gap:12px}main{padding-top:30px}.updated{font-size:11px}.outlet-top{margin-bottom:16px}}
+@media(max-width:380px){.shell{padding:0 12px}.top-actions{gap:6px}.top-actions button{padding:8px;font-size:12px}.brand{font-size:21px;gap:7px}.brand-mark{width:30px;height:30px;font-size:22px}.strip{padding:13px}.grid{gap:8px}.outlet{padding:12px}.socket{width:32px;height:32px}.socket::before,.socket::after{top:10px}.socket::before{left:8px}.socket::after{right:8px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important}}
 </style>
-<h1>powerk</h1>
-<div class=hint id=hint></div>
-<div role=alert id=error></div>
-<div id=app></div>
+</head>
+<body>
+<div class="shell">
+<header class="topbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true">⏻</span>powerk</div>
+  <div class="top-actions"><span class="status" id="connection">Connecting</span><button id="theme" type="button" aria-pressed="false">Dark theme</button><button id="refresh" type="button">↻ Refresh</button></div>
+</header>
+<main>
+  <div class="intro"><div><p class="eyebrow">Your home, your control</p><h1>Power overview</h1><p class="description">A little clarity for every connection.</p></div><span class="updated" id="updated">Waiting for a live update</span></div>
+  <div id="error" role="status" aria-live="polite"></div>
+  <section class="overview" aria-label="Power summary">
+    <div class="metric primary"><span class="metric-icon" aria-hidden="true">ϟ</span><p class="metric-label">Live power</p><div class="metric-value"><span id="total-power">—</span><small>W</small></div><p class="metric-note" id="power-note">Waiting for connected strips</p></div>
+    <div class="metric"><span class="metric-icon" aria-hidden="true">⏻</span><p class="metric-label">Active outlets</p><div class="metric-value"><span id="active-outlets">—</span><small id="outlet-total"></small></div><p class="metric-note">Across connected strips</p></div>
+    <div class="metric"><span class="metric-icon" aria-hidden="true">↗</span><p class="metric-label">Reported energy</p><div class="metric-value"><span id="total-energy">—</span><small>kWh</small></div><p class="metric-note" id="energy-note">Device-reported cumulative total</p></div>
+  </section>
+  <div class="section-heading"><h2>Your power strips</h2><span class="count" id="device-count">Connecting…</span></div>
+  <div id="app"></div>
+  <div class="empty" id="empty"><div class="empty-symbol" aria-hidden="true">⌁</div><h3 id="empty-title">Connecting to your home</h3><p id="empty-body">Your strips and their latest readings will appear here.</p><button id="setup-button" type="button">View connection setup</button></div>
+  <details class="setup" id="setup"><summary>Connection &amp; setup</summary><p id="hint">Waiting for server details.</p><p>To connect a new strip, provision it with this server's address while connected to the strip's setup Wi-Fi.</p><code id="provision">python powerk.py provision --ip SERVER_IP --ssid YOUR_WIFI --password YOUR_PASSWORD</code><p>Keep the strip connection on a trusted network. Refresh the dashboard after provisioning.</p></details>
+  <footer><span>Local control. A direct connection.</span><span>Readings update automatically · No cloud account</span></footer>
+</main>
+</div>
 <script>
-const token=new URLSearchParams(location.search).get('t')||'';
-if(token) history.replaceState(null,'',location.pathname);
-let busy=false, healthy=false, snapshot=null;
-const error=document.getElementById('error');
-async function api(p,b){
-  const response=await fetch(p,{method:b?'POST':'GET',headers:{'Content-Type':'application/json','X-Token':token},
-    body:b?JSON.stringify(b):undefined,signal:AbortSignal.timeout(12000)});
-  const text=await response.text();
-  if(!response.ok){let message=`HTTP ${response.status}`;try{message=JSON.parse(text).error||message}catch(e){}throw Error(message)}
-  return JSON.parse(text);
+const token = new URLSearchParams(location.search).get('t') || '';
+if (token) history.replaceState(null, '', location.pathname);
+const $ = id => document.getElementById(id);
+const error = $('error');
+const views = new Map();
+let busy = false, healthy = false, snapshot = null, reading = false;
+let refreshTask = null;
+let commandMessage = '', commandKind = 'success';
+function text(el, value) { if (el.textContent !== String(value)) el.textContent = String(value); }
+function notice(message, kind) { text(error, message); error.dataset.kind = kind; }
+function node(tag, value, parent, className = '') {
+  const el = document.createElement(tag);
+  el.className = className;
+  if (value) text(el, value);
+  parent.append(el);
+  return el;
 }
-async function cmd(mac,outlet,on){
-  if(busy||!healthy)return;
-  busy=true;render(snapshot);error.textContent='Sending command…';
-  try{const result=await api('api/onoff',{mac,outlet,on});if(!result.confirmed)throw Error('Outlet state was not confirmed');error.textContent='';await refresh()}
-  catch(e){error.textContent=e.message}
-  finally{busy=false;render(snapshot)}
+function format(value, digits = 1) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString(undefined, {maximumFractionDigits: digits}) : '—';
 }
-function node(tag,text,parent){const el=document.createElement(tag);el.textContent=text;parent.append(el);return el}
-function render(s){
-  if(!s)return;
-  document.getElementById('hint').textContent =
-    `server ${s.local_ip} | strip connects to TCP ${s.port} | provision with: powerk.py provision --ip ${s.local_ip}`;
-  const app=document.getElementById('app');app.replaceChildren();
-  for(const d of s.devices){
-    const online=d.online&&healthy;
-    const card=node('div','',app);card.className=online?'card':'card off';
-    const head=node('div','',card);head.className='head';
-    node('span',`${d.name} · ${online?'online':'offline / stale'}`,head).className='mac';
-    const all=node('button',d.on?'ALL OFF':'ALL ON',head);
-    all.className=d.on?'on':'';
-    all.disabled=busy||!online;all.onclick=()=>cmd(d.mac,0,!d.on);
-    const seen=d.last_seen?new Date(d.last_seen*1000).toLocaleTimeString():'never';
-    node('div',`${d.model} fw ${d.fw} | ${d.power_w} W | ${d.energy_kwh} kWh | ${d.voltage??'—'} V | ${d.current_a??'—'} A | wifi ${d.rssi??'—'} dBm | last update ${seen}`,card).className='stats';
-    const grid=node('div','',card);grid.className='grid';
-    for(const o of d.outlets){
-      const button=node('button',`Outlet ${o.n}`,grid);button.className=o.on?'on':'';
-      button.disabled=busy||!online;button.onclick=()=>cmd(d.mac,o.n,!o.on);
-      node('small',`${o.on?'ON':'OFF'} | ${o.power_w} W | ${o.temp_c} C`,button);
+function applyTheme(dark) {
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  $('theme').setAttribute('aria-pressed', String(dark));
+  text($('theme'), dark ? 'Light theme' : 'Dark theme');
+}
+try { applyTheme(localStorage.getItem('powerk-theme') === 'dark'); } catch (e) { applyTheme(false); }
+$('theme').onclick = () => {
+  const dark = document.documentElement.dataset.theme !== 'dark';
+  applyTheme(dark);
+  try { localStorage.setItem('powerk-theme', dark ? 'dark' : 'light'); } catch (e) {}
+};
+$('setup-button').onclick = () => { $('setup').open = true; $('setup').scrollIntoView({block:'nearest'}); };
+$('refresh').onclick = () => refresh();
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: {'Content-Type':'application/json', 'X-Token':token},
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(12000)
+  });
+  const value = await response.text();
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try { message = JSON.parse(value).error || message; } catch (e) {}
+    throw Error(message);
+  }
+  return JSON.parse(value);
+}
+async function cmd(mac, outlet, on) {
+  const device = snapshot?.devices.find(d => d.mac === mac);
+  if (busy || !healthy || !device?.online) return;
+  busy = true;
+  commandKind = 'pending';
+  commandMessage = outlet ? `Updating outlet ${outlet}…` : `Turning all outlets ${on ? 'on' : 'off'}…`;
+  notice(commandMessage, commandKind);
+  render(snapshot);
+  try {
+    const result = await api('api/onoff', {mac, outlet, on});
+    if (!result.confirmed) throw Error('Outlet state was not confirmed');
+    commandMessage = 'Outlet state confirmed.';
+    commandKind = 'success';
+    notice(commandMessage, commandKind);
+    if (refreshTask) await refreshTask;
+    await refresh();
+  } catch (e) {
+    commandMessage = e.message;
+    commandKind = 'error';
+    notice(commandMessage, commandKind);
+  } finally {
+    busy = false;
+    render(snapshot);
+  }
+}
+function createStrip() {
+  const card = node('article', '', $('app'), 'strip');
+  const header = node('div', '', card, 'strip-header');
+  const heading = node('div', '', header, 'strip-heading');
+  node('span', '⏻', heading, 'strip-icon').setAttribute('aria-hidden', 'true');
+  const titleBlock = node('div', '', heading);
+  const title = node('h3', '', titleBlock);
+  const caption = node('div', '', titleBlock, 'strip-caption');
+  const actions = node('div', '', header, 'actions');
+  const badge = node('span', '', actions, 'pill');
+  const allOn = node('button', 'All on', actions);
+  const allOff = node('button', 'All off', actions, 'all-off');
+  const summary = node('div', '', card, 'strip-summary');
+  const grid = node('div', '', card, 'grid');
+  const details = node('details', '', card, 'device-details');
+  node('summary', 'Device details', details);
+  const metadata = node('p', '', details, 'device-detail-text');
+  return {card, title, caption, badge, allOn, allOff, summary, grid, metadata, outlets:new Map()};
+}
+function createOutlet(grid) {
+  const card = node('div', '', grid, 'outlet');
+  const top = node('div', '', card, 'outlet-top');
+  node('span', '', top, 'socket').setAttribute('aria-hidden', 'true');
+  const toggle = node('button', '', top, 'toggle');
+  toggle.setAttribute('role', 'switch');
+  node('span', '', toggle, 'toggle-track').setAttribute('aria-hidden', 'true');
+  const title = node('h4', '', card, 'outlet-label');
+  const state = node('p', '', card, 'outlet-state');
+  const power = node('div', '', card, 'outlet-power');
+  const watts = node('span', '', power);
+  node('small', 'W', power);
+  const detail = node('div', '', card, 'outlet-detail');
+  return {card, toggle, title, state, watts, detail};
+}
+function render(s) {
+  if (!s) return;
+  $('refresh').disabled = busy || reading;
+  const devices = s.devices;
+  const online = healthy ? devices.filter(d => d.online) : [];
+  const outlets = online.flatMap(d => d.outlets);
+  const connected = online.length;
+  const total = devices.reduce((sum, d) => sum + (d.energy_kwh || 0), 0);
+  text($('connection'), healthy ? 'Server connected' : 'Connection lost');
+  $('connection').className = healthy ? 'status live' : 'status';
+  text($('total-power'), connected ? format(online.reduce((sum,d) => sum + d.power_w, 0)) : '—');
+  text($('power-note'), connected ? `${connected} strip${connected === 1 ? '' : 's'} reporting live` : 'No live readings available');
+  text($('active-outlets'), connected ? outlets.filter(o => o.on).length : '—');
+  text($('outlet-total'), connected ? `of ${outlets.length}` : '');
+  text($('total-energy'), devices.length ? format(total, 3) : '—');
+  text($('energy-note'), healthy && connected === devices.length ? 'Device-reported cumulative total' : 'Last reported total · may be stale');
+  text($('device-count'), `${connected} online · ${devices.length} known`);
+  text($('hint'), `Server ${s.local_ip} · Device connection: TCP ${s.port}`);
+  text($('provision'), `python powerk.py provision --ip ${s.local_ip} --ssid YOUR_WIFI --password YOUR_PASSWORD`);
+  $('empty').hidden = devices.length > 0;
+  text($('empty-title'), healthy ? 'Ready for your first connection' : 'Unable to reach your server');
+  text($('empty-body'), healthy ? 'Connect a power strip to see live readings and control each outlet from here.' : 'Check that Powerk is running and this browser can reach it. We will keep trying.');
+  for (const [mac, view] of views) {
+    if (!devices.some(d => d.mac === mac)) { view.card.remove(); views.delete(mac); }
+  }
+  for (const d of devices) {
+    if (!views.has(d.mac)) views.set(d.mac, createStrip());
+    const v = views.get(d.mac);
+    const live = healthy && d.online;
+    text(v.title, d.name);
+    text(v.caption, `4-outlet smart strip · ${d.mac.slice(-6)}`);
+    text(v.badge, live ? 'Online' : 'Offline / stale');
+    v.badge.className = live ? 'pill' : 'pill offline';
+    v.allOn.disabled = v.allOff.disabled = busy || !live;
+    v.allOn.onclick = () => cmd(d.mac, 0, true);
+    v.allOff.onclick = () => cmd(d.mac, 0, false);
+    v.allOn.setAttribute('aria-label', `Turn all outlets on for ${d.name}`);
+    v.allOff.setAttribute('aria-label', `Turn all outlets off for ${d.name}`);
+    const seen = d.last_seen ? new Date(d.last_seen * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : 'never';
+    text(v.summary, `${format(d.power_w)} W ${live ? 'live' : 'last reported'}  ·  ${format(d.energy_kwh, 3)} kWh  ·  ${format(d.voltage)} V  ·  Updated ${seen}`);
+    text(v.metadata, `Model: ${d.model} · Firmware: ${d.fw} · MAC: ${d.mac} · Current: ${format(d.current_a, 2)} A · Wi-Fi: ${format(d.rssi, 0)} dBm`);
+    for (const [n, outlet] of v.outlets) {
+      if (!d.outlets.some(o => o.n === n)) { outlet.card.remove(); v.outlets.delete(n); }
+    }
+    for (const o of d.outlets) {
+      if (!v.outlets.has(o.n)) v.outlets.set(o.n, createOutlet(v.grid));
+      const out = v.outlets.get(o.n);
+      out.card.className = o.on ? 'outlet is-on' : 'outlet';
+      text(out.title, `Outlet ${o.n}`);
+      text(out.state, !live ? 'Last known state · stale' : busy ? 'Command in progress…' : o.on ? 'Powered on' : 'Powered off');
+      text(out.watts, format(o.power_w));
+      text(out.detail, `${format(o.temp_c, 0)} °C · ${format(o.energy_kwh, 3)} kWh`);
+      out.toggle.disabled = busy || !live;
+      out.toggle.setAttribute('aria-checked', String(o.on));
+      out.toggle.setAttribute('aria-label', `Outlet ${o.n} on ${d.name}`);
+      out.toggle.onclick = () => cmd(d.mac, o.n, !o.on);
     }
   }
-  if(!s.devices.length)node('div','No strip connected yet. Provision the strip, then power-cycle it.',app).className='card';
 }
-async function refresh(){try{snapshot=await api('api/state');healthy=true;if(!busy)error.textContent='';render(snapshot)}catch(e){healthy=false;error.textContent=`Connection lost: ${e.message}`;render(snapshot)}}
-async function poll(){if(!busy)await refresh();setTimeout(poll,2000)}poll();
+function refresh() {
+  if (refreshTask) return refreshTask;
+  refreshTask = fetchState().finally(() => { refreshTask = null; });
+  return refreshTask;
+}
+async function fetchState() {
+  reading = true;
+  $('refresh').disabled = true;
+  try {
+    snapshot = await api('api/state');
+    healthy = true;
+    text($('updated'), `Last synced ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}`);
+    notice(commandMessage, commandKind);
+    render(snapshot);
+  } catch (e) {
+    healthy = false;
+    notice(`Connection lost: ${e.message}`, 'error');
+    text($('connection'), 'Connection lost');
+    $('connection').className = 'status';
+    text($('updated'), 'Live updates paused · retrying automatically');
+    if (snapshot) render(snapshot);
+    else {
+      text($('device-count'), 'Server unavailable');
+      text($('empty-title'), 'Unable to reach your server');
+      text($('empty-body'), 'Check that Powerk is running and this browser can reach it. We will keep trying.');
+    }
+  } finally {
+    reading = false;
+    $('refresh').disabled = busy;
+  }
+}
+async function poll() {
+  if (!busy) await refresh();
+  setTimeout(poll, 2000);
+}
+poll();
 </script>
+</body>
+</html>
 """
 
 

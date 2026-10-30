@@ -8,8 +8,14 @@ const script = fs.readFileSync('powerk.py', 'utf8').match(/<script>([\s\S]*?)<\/
 class Element {
   children = [];
   textContent = '';
-  append(child) { this.children.push(child); }
+  attributes = {};
+  dataset = {};
+  append(child) { child.parent = this; this.children.push(child); }
   replaceChildren() { this.children = []; }
+  setAttribute(key, value) { this.attributes[key] = value; }
+  getAttribute(key) { return this.attributes[key]; }
+  scrollIntoView() {}
+  remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
   set innerHTML(value) { throw Error('Device fields must never be parsed as HTML'); }
 }
 const state = {
@@ -20,10 +26,16 @@ const state = {
     outlets: [{ n: 1, on: false, power_w: 0, temp_c: 30 }] }],
 };
 function harness() {
-  const elements = Object.fromEntries(['hint', 'app', 'error'].map(id => [id, new Element()]));
+  const elements = {};
+  const storage = new Map();
   const requests = [];
   const context = vm.createContext({
-    document: { getElementById: id => elements[id], createElement: () => new Element() },
+    document: {
+      documentElement: new Element(),
+      getElementById: id => elements[id] ||= new Element(),
+      createElement: () => new Element(),
+    },
+    localStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)},
     location: { search: '?t=secret', pathname: '/' },
     history: { replaceState() {} }, URLSearchParams, AbortSignal,
     setTimeout() {},
@@ -33,7 +45,7 @@ function harness() {
     },
   });
   vm.runInContext(script, context);
-  return { context, elements, requests };
+  return { context, elements, requests, storage };
 }
 function descendants(element) {
   return [element, ...element.children.flatMap(descendants)];
@@ -53,7 +65,7 @@ test('failed polling disables controls and shows stale state', async () => {
   await vm.runInContext('refresh()', context);
   assert.match(elements.error.textContent, /Connection lost: network unavailable/);
   const controls = descendants(elements.app).filter(el => el.onclick);
-  assert.equal(controls.length, 2);
+  assert.equal(controls.length, 3);
   assert.ok(controls.every(el => el.disabled));
 });
 
@@ -74,6 +86,7 @@ test('unconfirmed command is visible and pending controls block duplicate comman
   complete();
   await command;
   assert.match(elements.error.textContent, /not confirmed/);
+  assert.equal(elements.error.dataset.kind, 'error');
   assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => !el.disabled));
 });
 
@@ -83,4 +96,73 @@ test('HTTP errors retain the server message', async () => {
   context.fetch = async () => ({ ok: false, status: 503, text: async () => '{"error":"device offline"}' });
   await vm.runInContext("cmd('AABBCCDDEEFF',1,true)", context);
   assert.equal(elements.error.textContent, 'device offline');
+});
+
+test('live updates preserve outlet controls and open device details', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  const toggle = descendants(elements.app).find(el => el.getAttribute('role') === 'switch');
+  const details = descendants(elements.app).find(el => el.className === 'device-details');
+  details.open = true;
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({
+    ...state, devices:[{...state.devices[0], power_w:23, outlets:[{...state.devices[0].outlets[0], on:true, power_w:23}]}],
+  })});
+  await vm.runInContext('refresh()', context);
+  const updated = descendants(elements.app).find(el => el.getAttribute('role') === 'switch');
+  assert.equal(updated, toggle);
+  assert.equal(toggle.getAttribute('aria-checked'), 'true');
+  assert.equal(details.open, true);
+  assert.equal(elements['total-power'].textContent, '23');
+  assert.equal(elements['active-outlets'].textContent, '1');
+});
+
+test('all on and all off send explicit values for mixed outlet states', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  const commands = [];
+  context.fetch = async (path, options) => {
+    if (options.body) commands.push(JSON.parse(options.body));
+    return {ok:true, text:async () => JSON.stringify(options.body ? {confirmed:true} : state)};
+  };
+  await descendants(elements.app).find(el => el.textContent === 'All on').onclick();
+  await descendants(elements.app).find(el => el.textContent === 'All off').onclick();
+  assert.deepEqual(commands, [
+    {mac:'AABBCCDDEEFF', outlet:0, on:true},
+    {mac:'AABBCCDDEEFF', outlet:0, on:false},
+  ]);
+  assert.equal(elements.error.dataset.kind, 'success');
+});
+
+test('offline readings do not appear as live totals', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({
+    ...state, devices:[{...state.devices[0], online:false, power_w:100, energy_kwh:12}],
+  })});
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements['total-power'].textContent, '—');
+  assert.equal(elements['active-outlets'].textContent, '—');
+  assert.equal(elements['total-energy'].textContent, '12');
+  assert.match(elements['energy-note'].textContent, /stale/);
+  assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => el.disabled));
+});
+
+test('theme choice is persisted and setup opens on request', async () => {
+  const { context, elements, storage } = harness();
+  await vm.runInContext('refresh()', context);
+  elements.theme.onclick();
+  assert.equal(storage.get('powerk-theme'), 'dark');
+  assert.equal(elements.theme.getAttribute('aria-pressed'), 'true');
+  elements['setup-button'].onclick();
+  assert.equal(elements.setup.open, true);
+});
+
+test('removed devices and outlets do not leave stale controls', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({...state, devices:[]})});
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements.app.children.length, 0);
+  assert.equal(elements.empty.hidden, false);
+  assert.match(elements['empty-title'].textContent, /first connection/);
 });

@@ -325,6 +325,16 @@ Behavior details:
 
 ## Web UI and HTTP API
 
+The responsive dashboard shows live power, active outlets, and the strip's
+cumulative energy readings. Each strip has individual outlet switches and
+separate **All on** / **All off** controls. Offline readings are marked as stale
+and excluded from live totals. **Dark theme** is saved in this browser.
+
+Expand **Device details** for model, firmware, and signal information, or
+**Connection & setup** for the server address and provisioning command. Live
+updates preserve keyboard focus and expanded panels. After updating `powerk.py`,
+restart the server process to load the new dashboard, then reload the browser.
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/` | the web UI |
