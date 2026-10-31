@@ -99,6 +99,20 @@ never use a colored glow. The muted divider `--line` is not a control boundary.
   selects with 44 px minimum height, explicit recording/error status, and a
   semantic table. A history table may scroll inside its labeled container on
   narrow screens; it must not cause page-level overflow.
+- Select options must explain the choice: include UTC bucket granularity for
+  periods, a full MAC identifier for strips with potentially identical names,
+  and combined versus individual AC scope. Keep these details in the closed
+  control too. Do not imply live status from historical device metadata.
+- Use native `select`, option values, keyboard handling, and form semantics.
+  Rich option layout is progressive enhancement: gate `appearance:base-select`
+  behind feature support and `(hover:hover) and (pointer:fine)`. Touch devices
+  retain their native picker. Stack history filters in one column at 900 px and
+  below so native labels have room. Fallback option text must read independently, with
+  separators hidden only in enhanced mode. Use shared theme/spacing tokens for
+  the picker, readable wrapping, a selected checkmark, and visible focus.
+- Keep option nodes and selection stable during polling. Queue device metadata
+  updates while the picker is open; apply them after selection, blur, or the
+  next closed-picker refresh. Historical strips stay available.
 - Label history buckets as UTC. Do not present the strip's lifetime counter as
   newly consumed energy, fill gaps with invented readings, or hide reset/gap
   flags. Report intervals crossing bucket boundaries separately. Historical

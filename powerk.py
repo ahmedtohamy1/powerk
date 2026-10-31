@@ -727,9 +727,28 @@ summary{cursor:pointer;min-height:var(--control-size);align-content:center;font-
 .setup summary{font-size:var(--text-sm)}.setup p{max-width:650px}.setup code{display:block;background:var(--surface);border:1px solid var(--line);padding:var(--space-4);border-radius:var(--radius-control);overflow-wrap:anywhere;white-space:pre-wrap;color:var(--ink);font-size:var(--text-xs)}
 footer{display:flex;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;color:var(--muted);font-size:var(--text-xs);margin-top:var(--space-8)}
 .history{margin-top:var(--space-8);padding:var(--space-6);background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-panel);min-width:0}
-.history-filters{display:grid;grid-template-columns:1fr 2fr 1fr auto auto;align-items:end;gap:var(--space-3);margin:var(--space-5) 0}
+.history-filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:end;gap:var(--space-3);margin:var(--space-5) 0}
 .history-filters label{display:grid;gap:var(--space-1);font-size:var(--text-xs);color:var(--muted);min-width:0}
 select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--control-border);border-radius:var(--radius-control);min-height:var(--control-size);min-width:0;max-width:100%;padding:var(--space-2)}
+.history-filter-actions{grid-column:1/-1;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--space-3)}
+@supports (appearance:base-select){
+  @media (hover:hover) and (pointer:fine){
+    .history select,.history select::picker(select){appearance:base-select}
+    .history select{width:100%;font-size:var(--text-sm);cursor:pointer}
+    .history select>button{all:unset;display:flex;align-items:center;flex:1;min-width:0}
+    .history selectedcontent{display:grid;min-width:0;text-align:left}
+    .history .option-label{font-weight:var(--weight-semibold);overflow-wrap:anywhere}
+    .history .option-detail{display:block;font-size:var(--text-xs);color:var(--muted);overflow-wrap:anywhere}
+    .history .option-separator{display:none}
+    .history select::picker(select){max-width:calc(100vw - var(--space-8));max-height:60vh;overflow:auto;padding:var(--space-1);border:1px solid var(--control-border);border-radius:var(--radius-control);background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+    .history option{min-height:var(--control-size);padding:var(--space-2) var(--space-3);border-radius:var(--radius-control);gap:var(--space-2);white-space:normal}
+    .history option:hover,.history option:focus-visible{background:var(--subtle)}
+    .history option:checked{background:var(--accent-soft);color:var(--accent-ink)}
+    .history option:checked .option-detail{color:var(--accent-ink)}
+    .history option::checkmark{color:var(--accent);margin-left:auto;order:1}
+    .history select::picker-icon{color:var(--muted);margin-left:var(--space-2)}
+  }
+}
 .history-stats{display:flex;flex-wrap:wrap;gap:var(--space-6);padding:var(--space-4) 0;border-top:1px solid var(--line)}
 .history-stat strong{display:block;font-size:var(--text-xl);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums}
 .history-stat span,.history-message,.history-note{font-size:var(--text-xs);color:var(--muted)}
@@ -739,7 +758,8 @@ select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid 
 .history th,.history td{padding:var(--space-3);border-bottom:1px solid var(--line)}
 .history th{font-weight:var(--weight-semibold);color:var(--muted)}
 .history-note{margin:var(--space-3) 0 0}
-@media(max-width:760px){.history{padding:var(--space-5)}.history-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.history-device{grid-column:1/-1;grid-row:1}}
+@media(max-width:900px){.history-filters{grid-template-columns:minmax(0,1fr)}.history-device{grid-column:1/-1;grid-row:1}}
+@media(max-width:760px){.history{padding:var(--space-5)}}
 @media(max-width:380px){.history{padding:var(--space-3)}}
 @media(max-width:760px){.shell{padding:0 var(--space-5)}.topbar{min-height:80px}.status{display:none}.overview{grid-template-columns:1fr 1fr;gap:var(--space-3)}.primary{grid-column:1/-1}.metric{padding:var(--space-5)}.metric-value{font-size:var(--text-3xl);margin-top:var(--space-4)}.metric-icon{top:var(--space-5);right:var(--space-5)}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.strip{padding:var(--space-5)}.intro{align-items:start;flex-direction:column;gap:var(--space-3)}main{padding-top:var(--space-8)}.outlet-top{margin-bottom:var(--space-4)}}
 @media(max-width:380px){.shell{padding:0 var(--space-3)}.top-actions{gap:var(--space-2)}.top-actions button{padding:var(--space-2);font-size:var(--text-xs)}.brand{font-size:var(--text-lg);gap:var(--space-2)}.strip{padding:var(--space-3)}.grid{gap:var(--space-2)}.outlet{padding:var(--space-3)}.socket{width:32px;height:32px}.socket::before,.socket::after{top:10px}.socket::before{left:8px}.socket::after{right:8px}}
@@ -767,10 +787,10 @@ select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid 
     <div class="section-heading"><h2 id="history-title">AC consumption history</h2><span class="pill" id="history-recording">Checking recorder…</span></div>
     <p class="history-note" id="history-saved">Recording begins when the server receives a complete strip reading.</p>
     <div class="history-filters">
-      <label>Period<select id="history-range"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option></select></label>
-      <label class="history-device">Power strip<select id="history-device"><option value="">All strips</option></select></label>
-      <label>AC outlet<select id="history-outlet"><option value="">All AC outlets</option><option value="1">Outlet 1</option><option value="2">Outlet 2</option><option value="3">Outlet 3</option><option value="4">Outlet 4</option></select></label>
-      <button id="history-refresh" type="button">Refresh history</button><button id="history-export" type="button" disabled>Export CSV</button>
+      <label>Period<select id="history-range"><button type="button"><selectedcontent></selectedcontent></button><option value="1"><span class="option-copy"><span class="option-label">Last 24 hours</span><span class="option-separator"> — </span><span class="option-detail">Hourly UTC buckets</span></span></option><option value="7" selected><span class="option-copy"><span class="option-label">Last 7 days</span><span class="option-separator"> — </span><span class="option-detail">Daily UTC buckets</span></span></option><option value="30"><span class="option-copy"><span class="option-label">Last 30 days</span><span class="option-separator"> — </span><span class="option-detail">Daily UTC buckets</span></span></option></select></label>
+      <label class="history-device">Power strip<select id="history-device"><button type="button"><selectedcontent></selectedcontent></button><option value=""><span class="option-copy"><span class="option-label">All strips</span><span class="option-separator"> — </span><span class="option-detail">Combined saved history</span></span></option></select></label>
+      <label>AC outlet<select id="history-outlet"><button type="button"><selectedcontent></selectedcontent></button><option value=""><span class="option-copy"><span class="option-label">All AC outlets</span><span class="option-separator"> — </span><span class="option-detail">Combined outlets 1–4</span></span></option><option value="1"><span class="option-copy"><span class="option-label">Outlet 1</span><span class="option-separator"> — </span><span class="option-detail">AC socket 1 only</span></span></option><option value="2"><span class="option-copy"><span class="option-label">Outlet 2</span><span class="option-separator"> — </span><span class="option-detail">AC socket 2 only</span></span></option><option value="3"><span class="option-copy"><span class="option-label">Outlet 3</span><span class="option-separator"> — </span><span class="option-detail">AC socket 3 only</span></span></option><option value="4"><span class="option-copy"><span class="option-label">Outlet 4</span><span class="option-separator"> — </span><span class="option-detail">AC socket 4 only</span></span></option></select></label>
+      <div class="history-filter-actions"><button id="history-refresh" type="button">Refresh history</button><button id="history-export" type="button" disabled>Export CSV</button></div>
     </div>
     <p class="history-message" id="history-message" role="status" aria-live="polite">Waiting for saved readings.</p>
     <div class="history-stats">
@@ -799,6 +819,7 @@ let refreshTask = null;
 let commandMessage = '', commandKind = 'success';
 let historyGeneration = 0, lastHistoryFetch = 0, historyExportParams = null, exportingHistory = false;
 const historyDevices = new Map();
+const historyDeviceDetails = new Map();
 function text(el, value) { if (el.textContent !== String(value)) el.textContent = String(value); }
 function notice(message, kind) { text(error, message); error.dataset.kind = kind; }
 function node(tag, value, parent, className = '') {
@@ -824,7 +845,8 @@ $('theme').onclick = () => {
 };
 $('setup-button').onclick = () => { $('setup').open = true; $('setup').scrollIntoView({block:'nearest'}); };
 $('refresh').onclick = () => refresh();
-for (const id of ['history-range', 'history-device', 'history-outlet']) $(id).onchange = () => loadHistory();
+for (const id of ['history-range', 'history-device', 'history-outlet']) $(id).onchange = () => { historyDeviceOptions([]); loadHistory(); };
+$('history-device').onblur = () => historyDeviceOptions([]);
 $('history-refresh').onclick = () => loadHistory();
 $('history-export').onclick = () => exportHistory();
 
@@ -834,12 +856,25 @@ function historyNotice(message, kind = '') {
 }
 function historyDeviceOptions(devices) {
   for (const device of devices) {
+    historyDeviceDetails.set(device.mac, {...historyDeviceDetails.get(device.mac), ...device});
+  }
+  // Never change choices under the pointer while the browser's picker is open.
+  try {
+    if ($('history-device').matches?.(':open')) return;
+  } catch (error) { /* Older browsers may not recognize :open. Keep native selects working. */ }
+  for (const device of historyDeviceDetails.values()) {
     if (!historyDevices.has(device.mac)) {
       const option = node('option', '', $('history-device'));
       option.value = device.mac;
-      historyDevices.set(device.mac, option);
+      const copy = node('span', '', option, 'option-copy');
+      const label = node('span', '', copy, 'option-label');
+      node('span', ' — ', copy, 'option-separator');
+      const detail = node('span', '', copy, 'option-detail');
+      historyDevices.set(device.mac, {option, label, detail});
     }
-    text(historyDevices.get(device.mac), `${device.name} · ${device.mac.slice(-6)}`);
+    const view = historyDevices.get(device.mac);
+    text(view.label, device.name || 'Power strip');
+    text(view.detail, `${device.model ? device.model + ' · ' : ''}${device.mac}`);
   }
 }
 function updateRecording(status) {

@@ -334,3 +334,48 @@ test('unknown firmware does not inherit USB hardware claims', async () => {
   await vm.runInContext('refresh()', context);
   assert.equal(descendants(elements.app).find(el => el.className === 'usb-info').hidden, true);
 });
+
+test('strip choices disambiguate identical names without changing values or parsing metadata', () => {
+  const {context, elements} = harness();
+  vm.runInContext(`historyDeviceOptions([
+    {mac:'112233445566', name:'Office', model:'<img src=x>'},
+    {mac:'AABBCC445566', name:'Office', model:'lgutap'}
+  ])`, context);
+  const select = elements['history-device'];
+  const options = select.children;
+  assert.deepEqual(options.map(option => option.value), ['112233445566', 'AABBCC445566']);
+  const labels = options.map(option => descendants(option).map(el => el.textContent).join(''));
+  assert.match(labels[0], /Office — <img src=x> · 112233445566/);
+  assert.match(labels[1], /Office — lgutap · AABBCC445566/);
+  select.value = '112233445566';
+  vm.runInContext("historyDeviceOptions([{mac:'112233445566', name:'Renamed'}])", context);
+  assert.equal(select.children[0], options[0]);
+  assert.equal(select.value, '112233445566');
+  assert.equal(select.children.length, 2, 'Historical strip remains selectable');
+  assert.match(descendants(options[0]).map(el => el.textContent).join(''), /Renamed — <img src=x> · 112233445566/);
+});
+
+test('polling queues strip changes while the native picker is open and applies them on blur', () => {
+  const {context, elements} = harness();
+  vm.runInContext("historyDeviceOptions([{mac:'112233445566', name:'Office'}])", context);
+  const select = elements['history-device'];
+  const first = select.children[0];
+  select.matches = selector => selector === ':open';
+  vm.runInContext(`historyDeviceOptions([
+    {mac:'112233445566', name:'Renamed'}, {mac:'AABBCCDDEEFF', name:'Kitchen'}
+  ])`, context);
+  assert.equal(select.children.length, 1);
+  assert.ok(descendants(first).some(el => el.textContent === 'Office'));
+  select.matches = () => false;
+  select.onblur();
+  assert.equal(select.children.length, 2);
+  assert.equal(select.children[0], first);
+  assert.ok(descendants(first).some(el => el.textContent === 'Renamed'));
+});
+
+test('browsers without the open pseudo-class still populate native strip choices', () => {
+  const {context, elements} = harness();
+  elements['history-device'].matches = () => { throw new SyntaxError('Unsupported selector'); };
+  vm.runInContext("historyDeviceOptions([{mac:'112233445566', name:'Office'}])", context);
+  assert.equal(elements['history-device'].children[0].value, '112233445566');
+});

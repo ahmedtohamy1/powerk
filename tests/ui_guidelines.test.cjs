@@ -140,3 +140,22 @@ test('large panels and active outlets stay neutral', () => {
   assert.doesNotMatch(css, /\.primary::after|gradient\(/);
   assert.equal(rules.find(rule => rule.selector === '#error[data-kind=success]').values.background, 'var(--subtle)');
 });
+
+test('informative selects progressively enhance desktop and retain meaningful native fallback text', () => {
+  assert.match(css, /@supports \(appearance:base-select\)\s*\{\s*@media \(hover:hover\) and \(pointer:fine\)/);
+  assert.match(css, /\.history \.option-separator\{display:none\}/);
+  assert.match(css, /\.history \.option-detail\{[^}]*overflow-wrap:anywhere/);
+  assert.ok(rules.some(rule => rule.selector === '.history-filters' && rule.values['grid-template-columns'] === 'minmax(0,1fr)'));
+  for (const id of ['history-range', 'history-device', 'history-outlet']) {
+    const select = source.match(new RegExp(`<select id="${id}">([\\s\\S]*?)</select>`))[1];
+    assert.match(select, /<button type="button"><selectedcontent><\/selectedcontent><\/button>/);
+    for (const [, content] of select.matchAll(/<option[^>]*>([\s\S]*?)<\/option>/g)) {
+      assert.match(content, /class="option-label">[^<]+</);
+      assert.match(content, /class="option-separator"> — </);
+      assert.match(content, /class="option-detail">[^<]+</);
+    }
+  }
+  assert.match(source, /Last 24 hours<\/span>.*Hourly UTC buckets/);
+  assert.match(source, /Last 7 days<\/span>.*Daily UTC buckets/);
+  assert.match(source, /Combined outlets 1–4/);
+});
