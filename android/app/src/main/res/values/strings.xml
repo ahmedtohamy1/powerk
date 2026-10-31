@@ -39,6 +39,7 @@
     <string name="field_host">Server IP or host</string>
     <string name="field_port">Port</string>
     <string name="field_token">Token</string>
+    <string name="use_https">Use HTTPS (requires a trusted server certificate)</string>
     <string name="save">Save</string>
     <string name="test">Test</string>
     <string name="saved">Saved</string>

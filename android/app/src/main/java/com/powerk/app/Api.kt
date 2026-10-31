@@ -1,6 +1,7 @@
 package com.powerk.app
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -64,7 +65,8 @@ object Api {
         val connection = (URL(url).openConnection() as HttpURLConnection)
         try {
             connection.connectTimeout = 4000
-            connection.readTimeout = 6000
+            connection.readTimeout = 12000
+            connection.instanceFollowRedirects = false
             connection.requestMethod = if (body == null) "GET" else "POST"
             if (token.isNotBlank()) connection.setRequestProperty("X-Token", token)
             if (body != null) {
@@ -77,6 +79,8 @@ object Api {
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) throw ServerException(errorOf(text, code))
             return text
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: ServerException) {
             throw e
         } catch (e: Exception) {

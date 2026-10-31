@@ -24,6 +24,7 @@ phone, from a PC, from anywhere if you run the server on a VPS.
 - [Mode B — Server (VPS, control from anywhere)](#mode-b--server-vps-control-from-anywhere)
 - [Android app (`android/`)](#android-app-android)
 - [Web UI and HTTP API](#web-ui-and-http-api)
+- [Consumption history](#consumption-history)
 - [Protocol reference](#protocol-reference)
 - [Troubleshooting](#troubleshooting)
 - [What this does not do (on purpose)](#what-this-does-not-do-on-purpose)
@@ -257,9 +258,22 @@ journalctl -u powerk -f      # [device] MTTL 91C0C4C model=lgutap fw=0.1.54-1.0.
 
 ### Keeping the UI private (optional but recommended)
 
-Port 10086 is fine to expose: control commands only ever travel server → strip,
-so a stranger who finds that port cannot switch anything. The **UI port** is the
-one that can turn your outlets on and off, so protect it:
+Protect both listeners. The strip's TCP protocol has no authentication or
+encryption: a client can claim a MAC address and send fabricated telemetry.
+Duplicate live sessions are rejected, but this does not authenticate a device.
+Keep TCP 10086 on a trusted LAN or route the home network through a VPN to the
+VPS; the strip itself cannot run a VPN client. If public exposure is unavoidable,
+restrict source addresses in the firewall where possible and enroll known MACs:
+
+```bash
+python powerk.py serve --token YOUR_TOKEN --allow-device AABBCCDDEEFF
+```
+
+Repeat `--allow-device` for multiple strips. Without this flag, any MAC can enroll
+(convenient for initial LAN setup). An allowlist is a filter, not authentication;
+an attacker who knows an allowed MAC can still impersonate a disconnected strip.
+The server bounds incoming connections and closes unresponsive device sessions.
+Protect the web UI/API as well:
 
 * **Token** (`--token`) — required for every page/API call. Without it the UI is
   open to anyone who finds the port.
@@ -270,7 +284,12 @@ one that can turn your outlets on and off, so protect it:
   encrypted.
 * Cleartext HTTP means the token is visible to anyone on the network path. If that
   matters, put your existing nginx/Apache in front as an HTTPS reverse proxy (or
-  use the VPN option above).
+  use the VPN option above). Bind the backend with `--web-bind 127.0.0.1` and
+  enable **Use HTTPS** in Android settings with the proxy's host and port. A
+  trusted certificate is required; certificate validation is never bypassed.
+
+`--device-bind` selects the TCP listener address; `--ip` only changes the address
+shown in the UI and provisioning hints, not either listener's bind address.
 
 ---
 
@@ -294,22 +313,39 @@ token, a connection Test, and a language switch.
 
 Behavior details:
 
-* Polls `/api/state` every 2 s; a press flips the tile immediately and shows a
+* Polls `/api/state` every 2 s while the app is visible; a press flips the tile immediately and shows a
   spinner in the switch while the strip confirms.
 * Commands are blocked per outlet while one is in flight — no toggle storms.
 * **Languages**: Arabic + English, following the phone by default; override in
   Settings (also appears in Android's per-app language menu).
 * Debug build, no signing setup — fine for personal use, not for the Play Store.
+* HTTP for trusted LANs; optional HTTPS for a reverse proxy with a trusted
+  certificate. Tokens are masked in settings and app backup is disabled.
 
 ---
 
 ## Web UI and HTTP API
+
+The responsive dashboard shows live power, active outlets, and the strip's
+cumulative energy readings. Each strip has individual outlet switches and
+separate **All on** / **All off** controls. Offline readings are marked as stale
+and excluded from live totals. **Dark theme** is saved in this browser.
+
+Model, firmware, watts, energy, voltage, current, and Wi-Fi signal are visible
+in each strip's main view. Expand **Device details** for the full MAC address, or
+**Connection & setup** for the server address and provisioning command. Live
+updates preserve keyboard focus and expanded panels. After updating `powerk.py`,
+restart the server process to load the new dashboard, then reload the browser.
+The normal server page controls real connected strips through the same API as
+the original interface; a separately labeled sample preview is not a device server.
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/` | the web UI |
 | GET | `/api/state` | `{"local_ip":"…","port":10086,"devices":[{"mac","name","model","fw","online","on","power_w","energy_kwh","voltage","current_a","rssi","outlets":[…]}]}` |
 | POST | `/api/onoff` | `{"mac":"…","outlet":0-4,"on":true}` — outlet `0` = all |
+| GET | `/api/history` | Filtered consumption summary, UTC buckets, and historical device list |
+| GET | `/api/history.csv` | Streaming raw readings for the selected period/device/outlet |
 | GET | `/powerk.py` | the script itself (public) |
 | GET | `/powerk.apk` | the built Android app, if present (public) |
 
@@ -321,6 +357,139 @@ When `--token` is set, every request needs it — any of:
 
 `/powerk.py` and `/powerk.apk` stay public on purpose, so a new phone can always
 download the app and a machine without Wi-Fi can always download the provisioner.
+
+Commands require a 12-hex MAC, an integer outlet `0..4`, and a JSON boolean `on`
+(strings such as `"false"` are rejected). Bodies are limited to 4 KiB. A command
+returns success only after all targeted relays report the requested state.
+Unconfirmed commands return 502, offline devices 503, and expired commands 504.
+The eight-second command deadline includes queueing; expiration cancels pending
+work, but cannot undo relay commands already sent. Refresh before retrying.
+State includes `last_seen`, the Unix timestamp of the latest complete status
+report. A failed device poll marks the strip offline and closes its session.
+The web UI disables offline/pending controls and reports connection failures.
+
+## Consumption history
+
+### USB charging ports and measurement scope
+
+The MTTL-W01 has four AC outlets and two USB charging ports, as listed by
+[LG U+](https://www.lguplus.com/smart-home/device/IOT1000005). The
+[Zorar controller's compatibility notes](https://zorarapp.com/compatibility)
+describe the USB ports as always-powered and not switchable. The
+[stock protocol guide](https://github.com/AmrEmad0/MTTL-W01_APP/blob/main/MTTL_CONTROLLER_PROTOCOL_GUIDE.md)
+documents telemetry/control for AC channels 1–4, without a verified USB meter or
+USB switching command. Do not infer USB functionality from an extra channel.
+
+For the verified `lgutap` / `0.1.54-1.0.66` family, the dashboard identifies
+**USB 1 + USB 2** and explains this limitation. USB live state, watts, and kWh remain
+unknown (`null`), not zero. Other firmware does not inherit these capability
+claims automatically. All on/off buttons address the four AC outlets only.
+
+**All existing and new saved readings, totals, history, and CSV exports cover
+AC outlets 1–4 only. They do not provide whole-strip or USB-port consumption.**
+Device snapshots and history reports expose
+`measurement_scope: "ac_outlets_1_to_4"`. Device snapshots include a `usb`
+capability object for the verified firmware (`port_count`, `power_design`,
+`control`, `metering`, and nullable `on`, `power_w`, `energy_kwh`); otherwise it is
+`null`. No new relay channels or USB history values are invented.
+
+For controllable charging with consumption history, a USB wall charger connected
+to one of the four smart AC outlets can be managed through that outlet. This
+measures the charger's AC input (including its losses and any connected devices),
+not separate USB outputs.
+
+### Saving and analyzing AC outlet readings
+
+Recording runs on the server, even when the browser and Android app are closed.
+Every **30 seconds per connected strip**, a complete snapshot saves all four
+outlets to **`data/history.sqlite3`** beside `powerk.py`. SQLite is part of Python's
+standard library; no database server or package installation is needed. Data
+survives restarts and is **never automatically deleted**. Runtime database files
+are excluded from Git.
+
+The web dashboard's **AC consumption history** section filters the last 24 hours,
+7 days, or 30 days by strip and outlet. It shows measured counter increases,
+saved reading counts, reset/gap flags, and an hourly/daily table using **UTC**.
+Historical devices remain in the filter even when disconnected. **Export CSV**
+downloads raw readings for those same filters, with the existing authentication.
+
+Configure storage and sampling if needed:
+
+```bash
+python powerk.py serve --web-port 8081 --history-db /path/to/history.sqlite3 --history-interval 30
+```
+
+`--history-interval` accepts 5–3600 seconds. Use a disk location the server user
+can write. Keep the server running to collect data. The recorder queues writes
+in a background thread; history queries and CSV exports do not block the device
+event loop. The UI reports the last saved timestamp and storage failures.
+
+How consumption is calculated:
+
+* The first saved reading for each outlet is a **baseline**, not new consumption.
+  Powerk cannot recover detailed history from before recording started.
+* Energy counters are stored as integer **Wh**. Consumption is the nonnegative
+  difference between consecutive saved counters, not an estimate from watts.
+* A lower counter is marked **`reset`** and contributes no delta. Its observed
+  value is retained as the new baseline; detected resets force an early save.
+  Usage around unobserved resets can be
+  undercounted; the application does not invent it.
+* An interval longer than `max(120 seconds, 3 × sampling interval)` is marked
+  **`gap`**. A nonnegative counter increase across that interval is preserved,
+  but its timing inside the gap is unknown. Flags count per-outlet intervals.
+* A period total includes a delta only when both saved observations are within
+  `[start, end)`. A UTC bucket includes it only when both observations also lie
+  in that bucket. Deltas crossing bucket boundaries are shown separately as
+  `unallocated_energy_kwh`, rather than assigned to the wrong hour/day.
+* Offline/stale snapshots are not saved as new readings. Disk/queue failures
+  are surfaced; the next saved counter may bridge a gap. No automatic retention
+  policy is applied, so disk usage grows with time and connected strip count.
+
+API filters for both endpoints: `start` and `end` are Unix seconds; optional
+`mac` is a 12-hex device address; optional `outlet` is `1..4`; `bucket` is `hour`
+or `day` (default `day`). The default period is the last seven days, with a
+maximum range of 366 days per request. Ranges can be exported in consecutive
+windows for longer-term analysis. Invalid filters return 400; unavailable storage
+returns 503. There is no generated API schema in this repository.
+
+`/api/state` also includes `history` recording status: `enabled`,
+`interval_seconds`, `last_recorded_at`, `readings_saved`, `failed_snapshots`, and
+`error`. Failure counts describe the current server process.
+
+`/api/history` returns `start`, `end`, `bucket`, `timezone`, `devices`, `buckets`,
+and `summary`. The summary includes `energy_kwh`, `readings`, `resets`, `gaps`,
+`first_sample`, `last_sample`, and `unallocated_energy_kwh`.
+
+CSV columns contain UTC timestamps and Unix seconds, MAC, outlet number, relay
+state, watts, cumulative counter in Wh, temperature in °C, voltage, RSSI in dBm,
+previous timestamp, interval length in seconds, delta Wh, and quality
+(`baseline`, `ok`, `gap`, `reset`). Missing values/deltas are blank, not zero.
+Preserve MACs as strings when importing into analytics tools.
+
+Back up the database with SQLite's backup API (or its `.backup` command), not by
+copying only the main file while the server is writing in WAL mode. CSV is useful
+for analysis; a SQLite backup preserves the complete database and metadata.
+
+## Development and validation
+
+For UI changes, follow [UI_GUIDELINES.md](UI_GUIDELINES.md). It defines the neutral
+palette, restrained blue accent, typography and spacing scales, accessible
+controls, and required visual review. CI checks the tokens and contrast in both
+themes alongside interaction behavior.
+
+```bash
+python -m unittest discover -s tests -v
+python powerk.py selftest
+node --test tests/*.test.cjs
+cd android
+./gradlew testDebugUnitTest lintDebug assembleDebug
+```
+
+CI runs the Python suite on 3.8 and 3.12, web UI tests on Node 20, and Android unit tests, lint, and a debug
+build with JDK 17 and SDK 37. Reports and the debug APK are uploaded as artifacts.
+Tests use localhost fake strips and HTTP servers; they require no physical strip.
+There is no generated API specification; update both clients, tests, and the API
+reference here when changing the contract.
 
 ## Protocol reference
 
@@ -354,7 +523,7 @@ some frames with NUL bytes and the port is fixed at 10086.
 
 ## What this does not do (on purpose)
 
-MQTT/Home Assistant entities, Matter, energy history, firmware OTA, multi-user
+MQTT/Home Assistant entities, Matter, firmware OTA, multi-user
 accounts. Add them when you actually want them.
 
 ---

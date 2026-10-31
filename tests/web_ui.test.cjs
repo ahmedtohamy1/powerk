@@ -1,0 +1,381 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const { test } = require('node:test');
+
+// Run the actual embedded UI with a minimal DOM that forbids HTML parsing.
+const script = fs.readFileSync('powerk.py', 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
+class Element {
+  children = [];
+  textContent = '';
+  attributes = {};
+  dataset = {};
+  append(child) { child.parent = this; this.children.push(child); }
+  replaceChildren() { this.children = []; }
+  setAttribute(key, value) { this.attributes[key] = value; }
+  getAttribute(key) { return this.attributes[key]; }
+  scrollIntoView() {}
+  click() { this.clicked = true; return this.onclick?.(); }
+  remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
+  set innerHTML(value) { throw Error('Device fields must never be parsed as HTML'); }
+}
+const state = {
+  local_ip: '127.0.0.1', port: 10086,
+  devices: [{ mac: 'AABBCCDDEEFF', name: 'test', model: '<img src=x onerror=alert(1)>',
+    fw: '<script>malicious()</script>', on: false, online: true, last_seen: 1,
+    power_w: 0, energy_kwh: 0,
+    outlets: [{ n: 1, on: false, power_w: 0, temp_c: 30 }] }],
+};
+function harness(initialState = state) {
+  const elements = {};
+  const storage = new Map();
+  const requests = [];
+  const context = vm.createContext({
+    document: {
+      documentElement: new Element(),
+      body: new Element(),
+      getElementById: id => elements[id] ||= new Element(),
+      createElement: () => new Element(),
+    },
+    localStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)},
+    location: { search: '?t=secret', pathname: '/' },
+    history: { replaceState() {} }, URLSearchParams, AbortSignal,
+    setTimeout() {},
+    fetch: async (path, options) => {
+      requests.push({ path, options });
+      return { ok: true, text: async () => JSON.stringify(initialState) };
+    },
+  });
+  vm.runInContext(script, context);
+  return { context, elements, requests, storage };
+}
+function descendants(element) {
+  return [element, ...element.children.flatMap(descendants)];
+}
+
+test('device metadata stays text and query token authenticates API calls', async () => {
+  const { context, elements, requests } = harness();
+  await vm.runInContext('refresh()', context);
+  assert.ok(descendants(elements.app).some(el => el.textContent.includes(state.devices[0].model)));
+  assert.equal(requests[0].options.headers['X-Token'], 'secret');
+});
+
+test('failed polling disables controls and shows stale state', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => { throw Error('network unavailable'); };
+  await vm.runInContext('refresh()', context);
+  assert.match(elements.error.textContent, /Connection lost: network unavailable/);
+  const controls = descendants(elements.app).filter(el => el.onclick);
+  assert.equal(controls.length, 3);
+  assert.ok(controls.every(el => el.disabled));
+});
+
+test('unconfirmed command is visible and pending controls block duplicate commands', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  let complete;
+  let commands = 0;
+  context.fetch = async () => {
+    commands++;
+    await new Promise(resolve => { complete = resolve; });
+    return { ok: true, text: async () => '{"ok":false,"confirmed":false}' };
+  };
+  const command = vm.runInContext("cmd('AABBCCDDEEFF',1,true)", context);
+  await vm.runInContext("cmd('AABBCCDDEEFF',1,true)", context);
+  assert.equal(commands, 1);
+  assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => el.disabled));
+  complete();
+  await command;
+  assert.match(elements.error.textContent, /not confirmed/);
+  assert.equal(elements.error.dataset.kind, 'error');
+  assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => !el.disabled));
+});
+
+test('HTTP errors retain the server message', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ ok: false, status: 503, text: async () => '{"error":"device offline"}' });
+  await vm.runInContext("cmd('AABBCCDDEEFF',1,true)", context);
+  assert.equal(elements.error.textContent, 'device offline');
+});
+
+test('live updates preserve outlet controls and open device details', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  const toggle = descendants(elements.app).find(el => el.getAttribute('role') === 'switch');
+  const details = descendants(elements.app).find(el => el.className === 'device-details');
+  details.open = true;
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({
+    ...state, devices:[{...state.devices[0], power_w:23, outlets:[{...state.devices[0].outlets[0], on:true, power_w:23}]}],
+  })});
+  await vm.runInContext('refresh()', context);
+  const updated = descendants(elements.app).find(el => el.getAttribute('role') === 'switch');
+  assert.equal(updated, toggle);
+  assert.equal(toggle.getAttribute('aria-checked'), 'true');
+  assert.equal(details.open, true);
+  assert.equal(elements['total-power'].textContent, '23');
+  assert.equal(elements['active-outlets'].textContent, '1');
+});
+
+test('all on and all off send explicit values for mixed outlet states', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  const commands = [];
+  context.fetch = async (path, options) => {
+    if (options.body) commands.push(JSON.parse(options.body));
+    return {ok:true, text:async () => JSON.stringify(options.body ? {confirmed:true} : state)};
+  };
+  await descendants(elements.app).find(el => el.textContent === 'All on').onclick();
+  await descendants(elements.app).find(el => el.textContent === 'All off').onclick();
+  assert.deepEqual(commands, [
+    {mac:'AABBCCDDEEFF', outlet:0, on:true},
+    {mac:'AABBCCDDEEFF', outlet:0, on:false},
+  ]);
+  assert.equal(elements.error.dataset.kind, 'success');
+});
+
+test('offline readings do not appear as live totals', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({
+    ...state, devices:[{...state.devices[0], online:false, power_w:100, energy_kwh:12}],
+  })});
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements['total-power'].textContent, '—');
+  assert.equal(elements['active-outlets'].textContent, '—');
+  assert.equal(elements['total-energy'].textContent, '12');
+  assert.match(elements['energy-note'].textContent, /stale/);
+  assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => el.disabled));
+});
+
+test('theme choice is persisted and setup opens on request', async () => {
+  const { context, elements, storage } = harness();
+  await vm.runInContext('refresh()', context);
+  elements.theme.onclick();
+  assert.equal(storage.get('powerk-theme'), 'dark');
+  assert.equal(elements.theme.getAttribute('aria-pressed'), 'true');
+  elements['setup-button'].onclick();
+  assert.equal(elements.setup.open, true);
+});
+
+test('removed devices and outlets do not leave stale controls', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({...state, devices:[]})});
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements.app.children.length, 0);
+  assert.equal(elements.empty.hidden, false);
+  assert.match(elements['empty-title'].textContent, /first connection/);
+});
+
+test('all four outlet switches send on and off commands to the correct strip', async () => {
+  const first = {...state.devices[0], outlets:[1, 2, 3, 4].map(n => ({
+    n, on:false, power_w:0, energy_kwh:0, temp_c:30,
+  }))};
+  const second = {...first, mac:'112233445566', name:'second strip', outlets:first.outlets.map(o => ({...o}))};
+  const live = {...state, devices:[first, second]};
+  const { context, elements } = harness(live);
+  await vm.runInContext('refresh()', context);
+  const sent = [];
+  context.fetch = async (path, options) => {
+    assert.equal(options.headers['X-Token'], 'secret');
+    if (options.body) {
+      assert.equal(path, 'api/onoff');
+      const command = JSON.parse(options.body);
+      sent.push(command);
+      const strip = live.devices.find(d => d.mac === command.mac);
+      strip.outlets.find(o => o.n === command.outlet).on = command.on;
+    } else {
+      assert.equal(path, 'api/state');
+    }
+    return {ok:true, text:async () => JSON.stringify(options.body ? {ok:true, confirmed:true} : live)};
+  };
+  for (const strip of live.devices) {
+    for (const n of [1, 2, 3, 4]) {
+      const toggle = descendants(elements.app).find(el => el.getAttribute('aria-label') === `Outlet ${n} on ${strip.name}`);
+      assert.ok(toggle, `Missing outlet ${n} on ${strip.name}`);
+      await toggle.onclick();
+      assert.deepEqual(sent.at(-1), {mac:strip.mac, outlet:n, on:true});
+      assert.equal(toggle.getAttribute('aria-checked'), 'true');
+      await toggle.onclick();
+      assert.deepEqual(sent.at(-1), {mac:strip.mac, outlet:n, on:false});
+      assert.equal(toggle.getAttribute('aria-checked'), 'false');
+    }
+  }
+  assert.equal(sent.length, 16);
+});
+
+test('the main strip view retains all original readings and power precision', async () => {
+  const strip = {...state.devices[0], model:'MTTL-W01', fw:'0.1.54-1.0.66',
+    power_w:0.01, energy_kwh:0.001, voltage:224.5, current_a:0.02, rssi:-52,
+    outlets:[{n:1, on:true, power_w:0.01, energy_kwh:0.001, temp_c:31}],
+  };
+  const { context, elements } = harness({...state, devices:[strip]});
+  await vm.runInContext('refresh()', context);
+  const caption = descendants(elements.app).find(el => el.className === 'strip-caption');
+  assert.match(caption.textContent, /MTTL-W01/);
+  assert.match(caption.textContent, /0\.1\.54-1\.0\.66/);
+  const readings = descendants(elements.app).find(el => el.className === 'strip-summary').textContent;
+  for (const expected of ['0.01 W', '0.001 kWh', '224.5 V', '0.02 A', '-52 dBm']) {
+    assert.ok(readings.includes(expected), `Missing visible reading: ${expected}`);
+  }
+  assert.equal(elements['total-power'].textContent, '0.01');
+  assert.ok(descendants(elements.app).some(el => el.className === 'outlet-detail' && el.textContent.includes('31 °C')));
+  assert.ok(descendants(elements.app).some(el => el.className === 'outlet-power' && el.children.some(child => child.textContent === '0.01')));
+});
+
+const historyReport = {
+  bucket:'day', devices:[{mac:'AABBCCDDEEFF', name:'test'}],
+  summary:{energy_kwh:.125, readings:8, resets:1, gaps:1, unallocated_energy_kwh:.005},
+  buckets:[{timestamp:1761868800, energy_kwh:.12, readings:8, resets:1, gaps:1}],
+};
+
+test('history filters request the selected device, outlet and period', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  elements['history-range'].value = '1';
+  elements['history-device'].value = 'AABBCCDDEEFF';
+  elements['history-outlet'].value = '3';
+  let requested;
+  context.fetch = async (path, options) => {
+    requested = new URLSearchParams(path.split('?')[1]);
+    assert.equal(options.headers['X-Token'], 'secret');
+    return {ok:true, text:async () => JSON.stringify(historyReport)};
+  };
+  await vm.runInContext('loadHistory()', context);
+  assert.equal(requested.get('mac'), 'AABBCCDDEEFF');
+  assert.equal(requested.get('outlet'), '3');
+  assert.equal(requested.get('bucket'), 'hour');
+  assert.equal(Number(requested.get('end')) - Number(requested.get('start')), 86400);
+  assert.equal(elements['history-energy'].textContent, '0.125');
+  assert.equal(elements['history-flags'].textContent, '2');
+  assert.equal(elements['history-rows'].children.length, 1);
+  assert.match(elements['history-boundaries'].textContent, /0.005 kWh/);
+  assert.equal(elements['history-export'].disabled, false);
+});
+
+test('old history requests cannot replace results for a newer filter', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  let resolveOld;
+  context.fetch = () => new Promise(resolve => { resolveOld = resolve; });
+  const old = vm.runInContext('loadHistory()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify(historyReport)});
+  await vm.runInContext('loadHistory()', context);
+  resolveOld({ok:true, text:async () => JSON.stringify({...historyReport, summary:{...historyReport.summary, energy_kwh:99}})});
+  await old;
+  assert.equal(elements['history-energy'].textContent, '0.125');
+});
+
+test('history failures are visible and never disable live outlet controls', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:false, status:503, text:async () => '{"error":"history storage unavailable"}'});
+  await vm.runInContext('loadHistory()', context);
+  assert.match(elements['history-message'].textContent, /history storage unavailable/);
+  assert.equal(elements['history-export'].disabled, true);
+  assert.equal(elements['history-energy'].textContent, '—');
+  assert.ok(descendants(elements.app).filter(el => el.onclick).every(el => !el.disabled));
+});
+
+test('CSV download uses the displayed report filters and authentication header', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify(historyReport)});
+  await vm.runInContext('loadHistory()', context);
+  let exportPath, savedBlob;
+  context.URL = {createObjectURL:blob => { savedBlob = blob; return 'blob:test'; }, revokeObjectURL() {}};
+  context.fetch = async (path, options) => {
+    exportPath = path;
+    assert.equal(options.headers['X-Token'], 'secret');
+    return {ok:true, blob:async () => new Blob(['timestamp_utc,power_w\r\n2026-10-30T12:00:00+00:00,5.3\r\n'])};
+  };
+  await vm.runInContext('exportHistory()', context);
+  assert.match(exportPath, /^api\/history\.csv\?start=/);
+  assert.ok(!exportPath.includes('secret'));
+  assert.match(await savedBlob.text(), /power_w/);
+  assert.match(elements['history-message'].textContent, /CSV downloaded/);
+  assert.equal(context.document.body.children.length, 0);
+});
+
+test('recording health distinguishes storage errors from no data', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify(historyReport)});
+  await vm.runInContext('loadHistory()', context);
+  vm.runInContext("updateRecording({enabled:true, interval_seconds:30, last_recorded_at:1000, failed_snapshots:2, error:'History write failed'})", context);
+  assert.equal(elements['history-recording'].textContent, 'Storage error');
+  assert.match(elements['history-saved'].textContent, /2 failed snapshots/);
+  assert.equal(elements['history-message'].dataset.kind, 'error');
+});
+
+test('USB ports are identified without fake switches, readings or analytics', async () => {
+  const strip = {...state.devices[0], power_w:5.3, energy_kwh:.01,
+    usb:{port_count:2, power_design:'always_powered', control:'not_exposed', metering:'not_reported', on:null, power_w:null, energy_kwh:null},
+  };
+  const { context, elements } = harness({...state, devices:[strip]});
+  await vm.runInContext('refresh()', context);
+  const usb = descendants(elements.app).find(el => el.className === 'usb-info');
+  assert.equal(usb.hidden, false);
+  assert.match(usb.children[0].textContent, /USB 1 \+ USB 2/);
+  assert.match(usb.children[1].textContent, /No USB software switch/);
+  assert.equal(descendants(usb).filter(el => el.onclick || el.getAttribute('role') === 'switch').length, 0);
+  assert.equal(elements['total-power'].textContent, '5.3');
+  assert.equal(elements['total-energy'].textContent, '0.01');
+  context.fetch = async () => ({ok:true, text:async () => JSON.stringify({...state, devices:[{...strip, online:false}]})});
+  await vm.runInContext('refresh()', context);
+  assert.equal(elements['total-power'].textContent, '—');
+  assert.match(usb.children[0].textContent, /design/);
+});
+
+test('unknown firmware does not inherit USB hardware claims', async () => {
+  const { context, elements } = harness();
+  await vm.runInContext('refresh()', context);
+  assert.equal(descendants(elements.app).find(el => el.className === 'usb-info').hidden, true);
+});
+
+test('strip choices disambiguate identical names without changing values or parsing metadata', () => {
+  const {context, elements} = harness();
+  vm.runInContext(`historyDeviceOptions([
+    {mac:'112233445566', name:'Office', model:'<img src=x>'},
+    {mac:'AABBCC445566', name:'Office', model:'lgutap'}
+  ])`, context);
+  const select = elements['history-device'];
+  const options = select.children;
+  assert.deepEqual(options.map(option => option.value), ['112233445566', 'AABBCC445566']);
+  const labels = options.map(option => descendants(option).map(el => el.textContent).join(''));
+  assert.match(labels[0], /Office — <img src=x> · 112233445566/);
+  assert.match(labels[1], /Office — lgutap · AABBCC445566/);
+  select.value = '112233445566';
+  vm.runInContext("historyDeviceOptions([{mac:'112233445566', name:'Renamed'}])", context);
+  assert.equal(select.children[0], options[0]);
+  assert.equal(select.value, '112233445566');
+  assert.equal(select.children.length, 2, 'Historical strip remains selectable');
+  assert.match(descendants(options[0]).map(el => el.textContent).join(''), /Renamed — <img src=x> · 112233445566/);
+});
+
+test('polling queues strip changes while the native picker is open and applies them on blur', () => {
+  const {context, elements} = harness();
+  vm.runInContext("historyDeviceOptions([{mac:'112233445566', name:'Office'}])", context);
+  const select = elements['history-device'];
+  const first = select.children[0];
+  select.matches = selector => selector === ':open';
+  vm.runInContext(`historyDeviceOptions([
+    {mac:'112233445566', name:'Renamed'}, {mac:'AABBCCDDEEFF', name:'Kitchen'}
+  ])`, context);
+  assert.equal(select.children.length, 1);
+  assert.ok(descendants(first).some(el => el.textContent === 'Office'));
+  select.matches = () => false;
+  select.onblur();
+  assert.equal(select.children.length, 2);
+  assert.equal(select.children[0], first);
+  assert.ok(descendants(first).some(el => el.textContent === 'Renamed'));
+});
+
+test('browsers without the open pseudo-class still populate native strip choices', () => {
+  const {context, elements} = harness();
+  elements['history-device'].matches = () => { throw new SyntaxError('Unsupported selector'); };
+  vm.runInContext("historyDeviceOptions([{mac:'112233445566', name:'Office'}])", context);
+  assert.equal(elements['history-device'].children[0].value, '112233445566');
+});

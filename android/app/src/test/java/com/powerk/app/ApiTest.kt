@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.net.InetSocketAddress
 
@@ -20,7 +21,7 @@ class ApiTest {
         var contentType = ""
     }
 
-    private fun serve(responseBody: String, captured: Captured): Pair<HttpServer, String> {
+    private fun serve(responseBody: String, captured: Captured, status: Int = 200): Pair<HttpServer, String> {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/api/onoff") { exchange ->
             captured.method = exchange.requestMethod
@@ -28,7 +29,7 @@ class ApiTest {
             captured.contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
             captured.body = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
             val bytes = responseBody.toByteArray()
-            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.sendResponseHeaders(status, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
         }
         server.start()
@@ -85,13 +86,58 @@ class ApiTest {
     @Test
     fun errorResponsesBecomeServerExceptions() {
         val captured = Captured()
-        val (server, base) = serve("""{"error":"device offline"}""", captured)
+        val (server, base) = serve("""{"error":"device offline"}""", captured, 503)
         try {
-            // HttpServer always answers 200 here, so simulate by asserting the body parses;
-            // the non-2xx path is covered by reading the error into a ServerException.
-            val response = JSONObject(Api.request("$base/api/onoff", "{}", ""))
-            assertEquals("device offline", response.optString("error"))
+            try {
+                Api.request("$base/api/onoff", "{}", "")
+                fail("HTTP 503 must throw")
+            } catch (e: ServerException) {
+                assertEquals("device offline", e.message)
+            }
             assertEquals("", captured.token)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun nonJsonErrorsKeepTheHttpStatus() {
+        val (server, base) = serve("token required", Captured(), 401)
+        try {
+            try {
+                Api.request("$base/api/onoff", "{}", "wrong")
+                fail("HTTP 401 must throw")
+            } catch (e: ServerException) {
+                assertEquals("HTTP 401", e.message)
+            }
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun redirectsDoNotForwardTokens() {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        var forwarded = false
+        server.createContext("/redirect") { exchange ->
+            exchange.responseHeaders.add("Location", "/target")
+            exchange.sendResponseHeaders(302, -1)
+            exchange.close()
+        }
+        server.createContext("/target") { exchange ->
+            forwarded = true
+            exchange.sendResponseHeaders(200, -1)
+            exchange.close()
+        }
+        server.start()
+        try {
+            try {
+                Api.request("http://127.0.0.1:${server.address.port}/redirect", null, "sekrit")
+                fail("Redirect must not be followed")
+            } catch (e: ServerException) {
+                assertEquals("HTTP 302", e.message)
+            }
+            assertTrue(!forwarded)
         } finally {
             server.stop(0)
         }
